@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Launcher: runs the pet from wherever this repo lives (symlink it onto your PATH).
+#   hyprland-pets              start (does nothing if one is already running)
+#   hyprland-pets --settings   open the settings window
+here="$(dirname "$(readlink -f "$0")")"
+exec python3 "$here/src/larry.py" "$@"
