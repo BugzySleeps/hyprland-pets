@@ -135,3 +135,7 @@ src/library.py       your own pictures
 src/sounds.py        synthesized UI sounds
 src/config.py        settings file
 ```
+
+## License
+
+MIT: use it, change it, share it, build on it. Contributions welcome. See [LICENSE](LICENSE).
