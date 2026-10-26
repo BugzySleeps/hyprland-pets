@@ -2,6 +2,7 @@
 import copy
 import math
 import random
+import re
 import time
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import cairo
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 import accessories  # noqa: E402
 import anim  # noqa: E402
@@ -17,6 +18,7 @@ import config  # noqa: E402
 import library  # noqa: E402
 import scene  # noqa: E402
 import sounds  # noqa: E402
+import themes  # noqa: E402
 import sprites  # noqa: E402
 from curve_editor import CurveEditor  # noqa: E402
 from fitting_room import FittingRoom  # noqa: E402
@@ -28,6 +30,8 @@ PAGES = [
     ("box", "Box", "weather-clear-symbolic", "The little world your pet walks around in"),
     ("anim", "Animation", "media-playback-start-symbolic", "How your pet moves: shape it with the graphs"),
     ("acc", "Accessories", "starred-symbolic", "Dress your pet up, then drag things around until they fit"),
+    ("fun", "Fun", "applications-games-symbolic", "Games, sounds and the little things your pet gets up to"),
+    ("theme", "Themes", "applications-graphics-symbolic", "Colours for this window, the box and the tab"),
 ]
 
 
@@ -69,7 +73,7 @@ def icon_button(text, icon, tip=None):
 
 class Settings(Gtk.Window):
     def __init__(self, pet):
-        super().__init__(title="Larry settings")
+        super().__init__(title=f"{pet.cfg['name']} settings")
         self.pet = pet
         self.cfg = copy.deepcopy(pet.cfg)
         self.syncing = True               # no sounds/saves while building
@@ -85,6 +89,9 @@ class Settings(Gtk.Window):
         self.connect("destroy", self.on_destroy)
         self.sound = sounds.Player(lambda: self.cfg["sounds"], lambda: self.cfg["volume"] / 100 * 0.8)
         self.style()
+        self.search_index = []    # {"page", "card", "title", "text"}: every settings card, for search
+        self.building = None
+        self.connect("key-press-event", self.on_window_key)
 
         root = Gtk.Box()
         self.add(root)
@@ -107,11 +114,26 @@ class Settings(Gtk.Window):
         self.avatar.set_size_request(56, 56)
         self.avatar.connect("draw", self.draw_avatar)
         names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
-        names.pack_start(label("Larry", "brand-title"), False, False, 0)
+        self.brand = label(self.pet.cfg["name"], "brand-title")
+        names.pack_start(self.brand, False, False, 0)
         names.pack_start(label("PET SETTINGS", "brand-sub"), False, False, 0)
         brand.pack_start(self.avatar, False, False, 0)
         brand.pack_start(names, False, False, 0)
         side.pack_start(brand, False, False, 0)
+
+        self.search = Gtk.SearchEntry(placeholder_text="Search settings")
+        css_class(self.search, "search")
+        self.search.connect("search-changed", self.on_search)
+        self.search.connect("activate", self.on_search_enter)
+        self.search.connect("stop-search", lambda e: e.set_text(""))
+        side.pack_start(self.search, False, False, 0)
+        self.results = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, no_show_all=True)
+        css_class(self.results, "results")
+        self.results.connect("row-activated", lambda _l, row: self.go_to(row.hit))
+        side.pack_start(self.results, False, False, 0)
+        self.no_results = label("Nothing found", "row-sub", xalign=0.5)
+        self.no_results.set_no_show_all(True)
+        side.pack_start(self.no_results, False, False, 8)
 
         self.nav = {}
         group = None
@@ -167,17 +189,22 @@ class Settings(Gtk.Window):
         main.pack_start(head, False, False, 0)
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_UP_DOWN, transition_duration=220)
-        for key, page in (("pet", self.pet_page()), ("box", self.box_page()), ("anim", self.anim_page()),
-                          ("acc", self.acc_page())):
+        self.pages = {}
+        for key, build in (("pet", self.pet_page), ("box", self.box_page), ("anim", self.anim_page),
+                           ("acc", self.acc_page), ("fun", self.fun_page), ("theme", self.theme_page)):
+            self.building = key      # cards made now belong to this page (for search)
+            page = build()
             scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
             scroll.add(page)
             self.stack.add_named(scroll, key)
+            self.pages[key] = (scroll, page)
         main.pack_start(self.stack, True, True, 0)
         self.show_page("pet")
         return main
 
     def card(self, title, sub=None, extra=None):
         box = css_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14), "card")
+        self.search_index.append({"page": self.building, "card": box, "title": title, "text": None})
         head = Gtk.Box(spacing=10)
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         titles.pack_start(label(title, "card-title"), False, False, 0)
@@ -260,6 +287,10 @@ class Settings(Gtk.Window):
         self.chooser.set_filename(self.cfg["image"])
         self.chooser.connect("file-set", self.on_image)
         right.pack_start(self.chooser, False, False, 0)
+        self.name_entry = Gtk.Entry(text=self.cfg["name"], placeholder_text="Name", max_length=32)
+        self.name_entry.set_tooltip_text("Your pet's name")
+        self.name_entry.connect("changed", self.on_name)
+        right.pack_start(self.name_entry, False, False, 0)
         reset = icon_button("Bring back Larry", "view-refresh-symbolic")
         reset.set_halign(Gtk.Align.START)
         reset.connect("clicked", self.on_reset)
@@ -283,39 +314,6 @@ class Settings(Gtk.Window):
             self.switches[key] = sw
         page.pack_start(c, False, False, 0)
 
-        c = self.card("Falling", "A different picture while it's thrown, falling or held")
-        self.fall_switch = Gtk.Switch(active=self.cfg["fall_image"] != "none", halign=Gtk.Align.END,
-                                      valign=Gtk.Align.CENTER)
-        self.fall_switch.connect("notify::active", self.on_fall_switch)
-        c.pack_start(self.setting_row("Falling pose", self.fall_switch,
-                                      "Larry stands up with his arms in the air (other pets need a picture below)"), False, False, 0)
-        row = Gtk.Box(spacing=8)
-        self.fall_chooser = Gtk.FileChooserButton(title="Choose a falling picture", action=Gtk.FileChooserAction.OPEN)
-        self.fall_chooser.add_filter(filt)
-        if pictures.is_dir():
-            self.fall_chooser.set_current_folder(str(pictures))
-        self.fall_chooser.connect("file-set", self.on_fall_image)
-        row.pack_start(self.fall_chooser, True, True, 0)
-        back = icon_button("Larry's", "view-refresh-symbolic", "Back to Larry's arms-up pose")
-        back.connect("clicked", self.on_fall_reset)
-        row.pack_start(back, False, False, 0)
-        c.pack_start(self.setting_row("Falling picture", row, "Drawn centred on the pet, no accessories"),
-                     False, False, 0)
-        self.show_fall_image()
-        page.pack_start(c, False, False, 0)
-
-        c = self.card("Terminals", "Drag your pet onto a terminal and let go: it moves in and walks along the "
-                                   "bottom. Drop it above a window instead to stand on top")
-        self.term_switch = Gtk.Switch(active=self.cfg["terminals"]["enabled"], halign=Gtk.Align.END,
-                                      valign=Gtk.Align.CENTER)
-        self.term_switch.connect("notify::active", self.on_term_switch)
-        c.pack_start(self.setting_row("Live in terminals", self.term_switch, "Grab it again to take it back out"),
-                     False, False, 0)
-        self.term_classes = Gtk.Entry(text=", ".join(self.cfg["terminals"]["classes"]), hexpand=True)
-        self.term_classes.connect("changed", self.on_term_classes)
-        c.pack_start(self.setting_row("Terminal apps", self.term_classes,
-                                      "Window classes, comma separated (hyprctl clients shows them)"), False, False, 0)
-        page.pack_start(c, False, False, 0)
         return page
 
     def box_page(self):
@@ -753,6 +751,207 @@ class Settings(Gtk.Window):
         self.update_modified()
         return page
 
+    def fun_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin_end=12)
+        filt = Gtk.FileFilter()          # for the falling-picture chooser
+        filt.set_name("Images")
+        filt.add_pixbuf_formats()
+        pictures = Path.home() / "Pictures"
+
+        c = self.card("Catch game", "Throw your pet up and catch it on the way down: +1, or +2 off a wall, +3 off "
+                                    "two sides. Catches count in a row; let it land and the streak's over. "
+                                    "Your best shows in the box")
+        self.game_switch = Gtk.Switch(active=self.cfg["game"], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+        self.game_switch.connect("notify::active", self.on_switch, "game")
+        c.pack_start(self.setting_row("Catch game", self.game_switch), False, False, 0)
+        self.pet_sound_switch = Gtk.Switch(active=self.cfg["pet_sounds"], halign=Gtk.Align.END,
+                                           valign=Gtk.Align.CENTER)
+        self.pet_sound_switch.connect("notify::active", self.on_switch, "pet_sounds")
+        c.pack_start(self.setting_row("Pet sounds", self.pet_sound_switch, "A moo (or “weee!” for other pets) when thrown, a blip when caught"),
+                     False, False, 0)
+        row = Gtk.Box(spacing=12)
+        self.best_label = label(f"Best: {self.pet.best}", "row-title")
+        row.pack_start(self.best_label, False, False, 0)
+        reset = icon_button("Reset best", "edit-clear-symbolic")
+        reset.connect("clicked", self.on_reset_best)
+        row.pack_end(reset, False, False, 0)
+        c.pack_start(row, False, False, 0)
+        page.pack_start(c, False, False, 0)
+
+        c = self.card("Reactions", "Your pet cheers when something finishes downloading")
+        self.react_switches = {}
+        for key, text, sub in (
+            ("packages", "Package installs",
+             "apt, pacman, AUR helpers, emerge, dnf, zypper, flatpak… finishing (sad if it failed)"),
+            ("downloads", "Downloads", "A file finishing in your Downloads folder"),
+            ("bubble", "Speech bubble", "Says what finished"),
+        ):
+            sw = Gtk.Switch(active=self.cfg["reactions"][key], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+            sw.connect("notify::active", self.on_reaction, key)
+            c.pack_start(self.setting_row(text, sw, sub), False, False, 0)
+            self.react_switches[key] = sw
+        test = icon_button("Try it", "media-playback-start-symbolic", "Make your pet react now")
+        test.set_halign(Gtk.Align.START)
+        test.connect("clicked", lambda _b: self.pet.on_finished("download", True, "test done"))
+        c.pack_start(test, False, False, 0)
+        page.pack_start(c, False, False, 0)
+
+        c = self.card("Idle behaviour", "What your pet gets up to when it isn't walking")
+        self.beh_switches = {}
+        for key, text, sub in (
+            ("watch", "Watch the cursor", "Stops and turns to look when the mouse comes close (Larry's eyes follow it)"),
+            ("sit", "Sit down", "Takes a seat now and then (Larry; other pets just stand)"),
+            ("sleep", "Fall asleep", "Dozes off when you leave the mouse alone; bring it close to wake it"),
+        ):
+            sw = Gtk.Switch(active=self.cfg["behavior"][key], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+            sw.connect("notify::active", self.on_behavior, key)
+            c.pack_start(self.setting_row(text, sw, sub), False, False, 0)
+            self.beh_switches[key] = sw
+        self.sleep_after = self.slider(config.SLEEP_MIN, config.SLEEP_MAX, 5, 0, self.cfg["behavior"]["sleep_after"],
+                                       " s", self.on_sleep_after)
+        c.pack_start(self.setting_row("Falls asleep after", self.sleep_after, "Seconds of a still mouse"), False, False, 0)
+        page.pack_start(c, False, False, 0)
+
+        c = self.card("Falling", "A different picture while it's thrown, falling or held")
+        self.fall_switch = Gtk.Switch(active=self.cfg["fall_image"] != "none", halign=Gtk.Align.END,
+                                      valign=Gtk.Align.CENTER)
+        self.fall_switch.connect("notify::active", self.on_fall_switch)
+        c.pack_start(self.setting_row("Falling pose", self.fall_switch,
+                                      "Larry stands up with his arms in the air (other pets need a picture below)"), False, False, 0)
+        row = Gtk.Box(spacing=8)
+        self.fall_chooser = Gtk.FileChooserButton(title="Choose a falling picture", action=Gtk.FileChooserAction.OPEN)
+        self.fall_chooser.add_filter(filt)
+        if pictures.is_dir():
+            self.fall_chooser.set_current_folder(str(pictures))
+        self.fall_chooser.connect("file-set", self.on_fall_image)
+        row.pack_start(self.fall_chooser, True, True, 0)
+        back = icon_button("Larry's", "view-refresh-symbolic", "Back to Larry's arms-up pose")
+        back.connect("clicked", self.on_fall_reset)
+        row.pack_start(back, False, False, 0)
+        c.pack_start(self.setting_row("Falling picture", row, "Drawn centred on the pet, no accessories"),
+                     False, False, 0)
+        self.show_fall_image()
+        page.pack_start(c, False, False, 0)
+
+        c = self.card("Typing in your terminal", "Napping in a terminal while you're away, your pet wakes up now and "
+                                                "then and types something silly there. It only shows on screen (never "
+                                                "typed into your shell) and only at a prompt, never over a program")
+        self.chat_switch = Gtk.Switch(active=self.cfg["chat"]["typing"], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+        self.chat_switch.connect("notify::active", self.on_chat_switch)
+        c.pack_start(self.setting_row("Types messages", self.chat_switch, "Off by default; needs Fall asleep on"),
+                     False, False, 0)
+        self.chat_every = self.slider(config.CHAT_MIN, config.CHAT_MAX, 1, 0, self.cfg["chat"]["every"], " min",
+                                      self.on_chat_every)
+        c.pack_start(self.setting_row("How often", self.chat_every, "Minutes between messages (3 per nap at most)"),
+                     False, False, 0)
+        page.pack_start(c, False, False, 0)
+
+        c = self.card("Terminals", "Drag your pet onto a terminal and let go: it moves in and walks along the "
+                                   "bottom. Drop it above a window instead to stand on top")
+        self.term_switch = Gtk.Switch(active=self.cfg["terminals"]["enabled"], halign=Gtk.Align.END,
+                                      valign=Gtk.Align.CENTER)
+        self.term_switch.connect("notify::active", self.on_term_switch)
+        c.pack_start(self.setting_row("Live in terminals", self.term_switch, "Grab it again to take it back out"),
+                     False, False, 0)
+        self.term_classes = Gtk.Entry(text=", ".join(self.cfg["terminals"]["classes"]), hexpand=True)
+        self.term_classes.connect("changed", self.on_term_classes)
+        c.pack_start(self.setting_row("Terminal apps", self.term_classes,
+                                      "Window classes, comma separated (hyprctl clients shows them)"), False, False, 0)
+        page.pack_start(c, False, False, 0)
+
+        return page
+
+    def theme_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin_end=12)
+        c = self.card("Theme", "Desktop follows your rice theme if you use it, otherwise your GTK theme")
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                           min_children_per_line=2, max_children_per_line=4, column_spacing=12, row_spacing=12)
+        group, self.theme_buttons, self.theme_tiles = None, {}, []
+        for key, (title, _pal, _light) in themes.THEMES.items():
+            b = Gtk.RadioButton(group=group)
+            group = group or b
+            b.set_mode(False)
+            css_class(b, "tile")
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            pic = Gtk.DrawingArea()
+            pic.set_size_request(150, 88)
+            pic.connect("draw", self.draw_theme_tile, key)
+            self.theme_tiles.append(pic)
+            inner.pack_start(pic, False, False, 0)
+            inner.pack_start(label(title, "tile-label", xalign=0.5), False, False, 0)
+            b.add(inner)
+            b.snd = "select"
+            flow.add(b)
+            self.theme_buttons[key] = b
+        self.theme_buttons[self.cfg["theme"]].set_active(True)
+        for key, b in self.theme_buttons.items():
+            b.connect("toggled", lambda btn, k=key: btn.get_active() and self.on_theme(k))
+        c.pack_start(flow, False, False, 0)
+        page.pack_start(c, False, False, 0)
+
+        c = self.card("The box")
+        self.match_switch = Gtk.Switch(active=self.cfg["box"]["match_theme"], halign=Gtk.Align.END,
+                                       valign=Gtk.Align.CENTER)
+        self.match_switch.connect("notify::active", self.on_match_theme)
+        c.pack_start(self.setting_row("Box matches the theme", self.match_switch,
+                                      "The built-in skies (day, sunset, night) take on the theme's colours; "
+                                      "your own sky pictures stay as they are"), False, False, 0)
+        page.pack_start(c, False, False, 0)
+        return page
+
+    def on_match_theme(self, sw, _p):
+        if not self.syncing and self.cfg["box"]["match_theme"] != sw.get_active():
+            self.cfg["box"]["match_theme"] = sw.get_active()
+            self.apply()
+
+    def draw_theme_tile(self, area, cr, key):
+        """A tiny settings window in the theme's colours."""
+        w, h = area.get_allocated_width(), area.get_allocated_height()
+        c = self.pet.theme_preview(key)
+        rounded(cr, 0, 0, w, h, 10)
+        cr.set_source_rgb(*c["bg0"])
+        cr.fill_preserve()
+        cr.set_source_rgba(*c["accent"], 0.35)
+        cr.set_line_width(1)
+        cr.stroke()
+        rounded(cr, 6, 6, w * 0.26, h - 12, 7)               # sidebar
+        cr.set_source_rgb(*c["bg1"])
+        cr.fill()
+        rounded(cr, 10, 14, w * 0.26 - 8, 9, 4)                # selected nav item
+        cr.set_source_rgba(*c["accent2"], 0.7)
+        cr.fill()
+        for i in range(3):
+            rounded(cr, 12, 30 + i * 12, w * 0.26 - 16, 5, 2.5)
+            cr.set_source_rgba(*c["fg"], 0.35)
+            cr.fill()
+        x0 = w * 0.26 + 14
+        rounded(cr, x0, 10, w - x0 - 8, h - 20, 8)             # a card
+        cr.set_source_rgb(*c["bg1"])
+        cr.fill()
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(15)
+        cr.move_to(x0 + 9, 34)
+        cr.set_source_rgb(*c["fg"])
+        cr.show_text("Aa")
+        rounded(cr, x0 + 9, 46, (w - x0 - 26) * 0.75, 6, 3)    # a slider
+        cr.set_source_rgba(*c["fg"], 0.15)
+        cr.fill()
+        rounded(cr, x0 + 9, 46, (w - x0 - 26) * 0.45, 6, 3)
+        cr.set_source_rgb(*c["accent2"])
+        cr.fill()
+        rounded(cr, w - 40, h - 30, 24, 13, 6.5)               # a switch, on
+        cr.set_source_rgb(*c["accent2"])
+        cr.fill()
+        cr.arc(w - 22.5, h - 23.5, 4.5, 0, 2 * math.pi)
+        cr.set_source_rgb(*((1, 1, 1) if themes.is_light(c) else c["fg"]))
+        cr.fill()
+
+    def on_theme(self, key):
+        if self.syncing or self.cfg["theme"] == key:
+            return
+        self.cfg["theme"] = key
+        self.apply()            # the pet recolours, then calls restyle() on this window
+
     def acc_page(self):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin_end=12)
 
@@ -971,10 +1170,19 @@ class Settings(Gtk.Window):
         self.add_picture("accessories")
 
     # ── look ────────────────────────────────────────────────────────────────
+    def restyle(self):
+        """The theme changed: recolour the window and everything drawn in it."""
+        self.style()
+        self.refresh()
+        self.preview.queue_draw()
+        for t in getattr(self, "theme_tiles", []):
+            t.queue_draw()
+
     def style(self):
         c = self.pet.colors
         bg0, bg1, fg = hexc(c["bg0"]), hexc(c["bg1"]), hexc(c["fg"])
         acc, acc2 = hexc(c["accent"]), hexc(c["accent2"])
+        knob = "#ffffff" if themes.is_light(c) else fg   # light themes: white knobs, not dark ones
         css = f"""
         window.larry {{ background-color: {bg0}; color: {fg};
             background-image: radial-gradient(circle at 85% 0%, alpha({acc2}, 0.10), transparent 55%); }}
@@ -997,6 +1205,11 @@ class Settings(Gtk.Window):
         .saved {{ opacity: 0; color: {acc2}; font-weight: 700; transition: opacity 500ms ease; }}
         .saved.show {{ opacity: 1; transition: opacity 120ms ease; }}
 
+        window.larry entry.search {{ margin-bottom: 12px; border-radius: 12px; padding: 7px 10px; }}
+        window.larry .results {{ background: transparent; }}
+        window.larry .results row {{ border-radius: 10px; }}
+        window.larry .results row:hover {{ background: alpha({acc2}, 0.18); }}
+        .card.found {{ border-color: {acc2}; box-shadow: 0 0 0 2px alpha({acc2}, 0.8), 0 0 24px alpha({acc2}, 0.45); }}
         .page-title {{ font-size: 28px; font-weight: 800; }}
         .page-sub {{ opacity: 0.6; }}
         .card {{ background-image: linear-gradient(to bottom, alpha({bg1}, 0.92), alpha({bg1}, 0.70));
@@ -1044,14 +1257,14 @@ class Settings(Gtk.Window):
                   border-radius: 999px; transition: all 200ms ease; min-width: 46px; }}
         window.larry switch:checked {{ background-image: linear-gradient(to right, alpha({acc2}, 0.7), {acc2});
                   border-color: {acc2}; box-shadow: 0 0 12px alpha({acc2}, 0.4); }}
-        window.larry switch slider {{ background: {fg}; border: none; border-radius: 999px;
+        window.larry switch slider {{ background: {knob}; border: none; border-radius: 999px;
                   box-shadow: 0 2px 6px alpha(black, 0.35); }}
 
         window.larry scale {{ padding: 10px 6px; }}
         window.larry scale trough {{ background: alpha({fg}, 0.10); border: none; border-radius: 999px; min-height: 6px; }}
         window.larry scale highlight {{ background-image: linear-gradient(to right, alpha({acc2}, 0.55), {acc2});
                   border: none; border-radius: 999px; }}
-        window.larry scale slider {{ background: {fg}; border: none; border-radius: 999px; min-width: 18px;
+        window.larry scale slider {{ background: {knob}; border: none; border-radius: 999px; min-width: 18px;
                   min-height: 18px; margin: -7px; box-shadow: 0 0 0 4px alpha({acc2}, 0.25), 0 2px 6px alpha(black, 0.4);
                   transition: box-shadow 160ms ease; }}
         window.larry scale slider:hover, window.larry scale slider:active {{
@@ -1061,13 +1274,25 @@ class Settings(Gtk.Window):
         window.larry scrollbar slider {{ background: alpha({fg}, 0.18); border-radius: 999px; min-width: 6px; border: none; }}
         window.larry scrollbar {{ background: transparent; border: none; }}
         """
-        self.css = Gtk.CssProvider()
+        if getattr(self, "css", None) is None:
+            self.css = Gtk.CssProvider()
+            Gtk.StyleContext.add_provider_for_screen(self.get_screen(), self.css,
+                                                     Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.css.load_from_data(css.encode())
-        Gtk.StyleContext.add_provider_for_screen(self.get_screen(), self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
     # ── sounds ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def pass_scroll(widget, _ev):
+        """Sliders and dropdowns ignore the mouse wheel: it scrolls the page instead, so scrolling
+        through the settings never changes one by accident (click or drag them to change them)."""
+        widget.stop_emission_by_name("scroll-event")
+        return False      # carry on up to the page
+
     def hook_sounds(self, widget):
-        """Give every control its sound (skipped while the window is changing things itself)."""
+        """Give every control its sound (skipped while the window is changing things itself), and
+        stop sliders/dropdowns from eating the scroll wheel."""
+        if isinstance(widget, (Gtk.Scale, Gtk.ComboBox, Gtk.SpinButton)):
+            widget.connect("scroll-event", self.pass_scroll)
         if isinstance(widget, Gtk.Scale):
             widget.connect("value-changed", self.snd_scale)
         elif isinstance(widget, Gtk.Switch):
@@ -1100,6 +1325,108 @@ class Settings(Gtk.Window):
             self.sound.play(name)
 
     # ── navigation ──────────────────────────────────────────────────────────
+    # ── search ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def label_text(widget, out):
+        """Every bit of text in a card: its title, description, setting names and hints, tile names."""
+        if isinstance(widget, Gtk.Label):
+            out.append(widget.get_text())
+        elif isinstance(widget, Gtk.Entry) and widget.get_placeholder_text():
+            out.append(widget.get_placeholder_text())
+        if isinstance(widget, Gtk.Container):
+            widget.forall(lambda w: Settings.label_text(w, out))
+        return out
+
+    def find(self, query):
+        words = query.lower().split()
+        if not words:
+            return []
+        hits = []
+        for hit in self.search_index:
+            if hit["text"] is None:
+                hit["text"] = " ".join(self.label_text(hit["card"], [])).lower()
+            page_title = next(p[1] for p in PAGES if p[0] == hit["page"]).lower()
+            hay = re.findall(r"\w+", hit["text"] + " " + page_title)
+            # short words have to start a word in the card ("hat" finds "hats", not "that"); longer
+            # ones can be anywhere in one ("sleep" finds "asleep")
+            def found(w, tokens):
+                return any(t.startswith(w) or (len(w) >= 4 and w in t) for t in tokens)
+            if all(found(w, hay) for w in words):
+                title = re.findall(r"\w+", hit["title"].lower())
+                if all(found(w, title) for w in words):
+                    rank = 0                                   # it's the card's name
+                elif all(w in hay for w in words):
+                    rank = 1                                   # whole words
+                else:
+                    rank = 2                                   # beginnings of words
+                hits.append((rank, hit))
+        return [h for _rank, h in sorted(hits, key=lambda x: x[0])]
+
+    def on_search(self, entry):
+        for row in self.results.get_children():
+            self.results.remove(row)
+        query = entry.get_text().strip()
+        searching = bool(query)
+        for b in self.nav.values():
+            b.set_visible(not searching)
+        hits = self.find(query)
+        for hit in hits[:12]:
+            row = Gtk.ListBoxRow()
+            row.hit = hit
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1, margin=8)
+            box.pack_start(label(hit["title"], "row-title"), False, False, 0)
+            page = next(p[1] for p in PAGES if p[0] == hit["page"])
+            where = label(f"in {page}" + self.snippet(hit, query), "row-sub")
+            where.set_ellipsize(3)   # Pango.EllipsizeMode.END
+            box.pack_start(where, False, False, 0)
+            row.add(box)
+            row.show_all()
+            self.results.add(row)
+        self.results.set_visible(searching and bool(hits))
+        self.no_results.set_visible(searching and not hits)
+
+    def snippet(self, hit, query):
+        """The setting inside the card that matched, if it wasn't the card's own title."""
+        words = query.lower().split()
+        if all(w in hit["title"].lower() for w in words):
+            return ""
+        for text in self.label_text(hit["card"], [])[1:]:
+            if any(w in text.lower() for w in words) and len(text) < 60:
+                return f"  ·  {text}"
+        return ""
+
+    def on_search_enter(self, _entry):
+        rows = self.results.get_children()
+        if rows:
+            self.go_to(rows[0].hit)
+
+    def go_to(self, hit):
+        """Open the card's page, scroll it into view and make it glow for a moment."""
+        self.nav[hit["page"]].set_active(True)
+        self.show_page(hit["page"])
+
+        def scroll():
+            sw, page = self.pages[hit["page"]]
+            coords = hit["card"].translate_coordinates(page, 0, 0)
+            if coords:
+                adj = sw.get_vadjustment()
+                adj.set_value(min(max(coords[1] - 12, 0), adj.get_upper() - adj.get_page_size()))
+            ctx = hit["card"].get_style_context()
+            ctx.add_class("found")
+            GLib.timeout_add(1400, lambda: (ctx.remove_class("found"), False)[1])
+            return False
+        GLib.timeout_add(260, scroll)   # after the page slides in
+
+    def on_window_key(self, _w, ev):
+        ctrl = ev.state & Gdk.ModifierType.CONTROL_MASK
+        if ctrl and Gdk.keyval_name(ev.keyval) in ("f", "F"):
+            self.search.grab_focus()
+            return True
+        if Gdk.keyval_name(ev.keyval) == "Escape" and self.search.get_text():
+            self.search.set_text("")
+            return True
+        return False
+
     def on_nav(self, button, key):
         if button.get_active():
             self.show_page(key)
@@ -1116,11 +1443,26 @@ class Settings(Gtk.Window):
         self.syncing = True
         self.cfg = copy.deepcopy(cfg)
         self.chooser.set_filename(cfg["image"])
+        if self.name_entry.get_text().strip() != cfg["name"]:
+            self.name_entry.set_text(cfg["name"])
+        self.brand.set_text(cfg["name"])
+        self.set_title(f"{cfg['name']} settings")
         self.size.set_value(cfg["size"])
         for key, sw in self.switches.items():
             sw.set_active(cfg[key])
         self.term_switch.set_active(cfg["terminals"]["enabled"])
         self.fall_switch.set_active(cfg["fall_image"] != "none")
+        for key, sw in self.beh_switches.items():
+            sw.set_active(cfg["behavior"][key])
+        self.sleep_after.set_value(cfg["behavior"]["sleep_after"])
+        for key, sw in self.react_switches.items():
+            sw.set_active(cfg["reactions"][key])
+        self.game_switch.set_active(cfg["game"])
+        self.chat_switch.set_active(cfg["chat"]["typing"])
+        self.chat_every.set_value(cfg["chat"]["every"])
+        self.theme_buttons[cfg["theme"]].set_active(True)
+        self.match_switch.set_active(cfg["box"]["match_theme"])
+        self.pet_sound_switch.set_active(cfg["pet_sounds"])
         self.show_fall_image()
         if [c.strip() for c in self.term_classes.get_text().split(",") if c.strip()] != cfg["terminals"]["classes"]:
             self.term_classes.set_text(", ".join(cfg["terminals"]["classes"]))
@@ -1191,6 +1533,15 @@ class Settings(Gtk.Window):
         self.switches["remove_bg"].set_active(not sprites.has_transparency(path))
         self.apply()
 
+    def on_name(self, entry):
+        if self.syncing:
+            return
+        name = entry.get_text().strip() or config.DEFAULTS["name"]
+        self.cfg["name"] = name
+        self.brand.set_text(name)
+        self.set_title(f"{name} settings")
+        self.scene_apply_soon()   # saves once you pause typing
+
     def on_reset(self, _b):
         self.cfg.update({k: config.DEFAULTS[k] for k in ("image", "faces_left", "remove_bg")})
         self.syncing = True
@@ -1249,6 +1600,40 @@ class Settings(Gtk.Window):
         self.show_fall_image()
         self.syncing = False
         self.apply()
+
+    def on_behavior(self, sw, _p, key):
+        if not self.syncing and self.cfg["behavior"][key] != sw.get_active():
+            self.cfg["behavior"][key] = sw.get_active()
+            self.apply()
+
+    def on_reset_best(self, _b):
+        self.pet.reset_best()
+
+    def update_best(self):
+        """The pet calls this when the record changes."""
+        self.best_label.set_text(f"Best: {self.pet.best}")
+
+    def on_chat_switch(self, sw, _p):
+        if not self.syncing and self.cfg["chat"]["typing"] != sw.get_active():
+            self.cfg["chat"]["typing"] = sw.get_active()
+            self.apply()
+
+    def on_chat_every(self, scale):
+        if self.syncing:
+            return
+        self.cfg["chat"]["every"] = int(scale.get_value())
+        self.scene_apply_soon()
+
+    def on_reaction(self, sw, _p, key):
+        if not self.syncing and self.cfg["reactions"][key] != sw.get_active():
+            self.cfg["reactions"][key] = sw.get_active()
+            self.apply()
+
+    def on_sleep_after(self, scale):
+        if self.syncing:
+            return
+        self.cfg["behavior"]["sleep_after"] = int(scale.get_value())
+        self.scene_apply_soon()   # saves once you stop dragging
 
     def on_term_switch(self, sw, _p):
         if not self.syncing:

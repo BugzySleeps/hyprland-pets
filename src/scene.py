@@ -105,6 +105,17 @@ def background(cr, w, h, box, c):
     }.get(kind)
     if not stops:
         return
+    if kind != "theme" and box.get("match_theme", True):
+        # the same sky in the theme's colours: keep its light (night stays dark, day stays bright)
+        # but take on the theme's hues
+        white, black = (1, 1, 1), (0, 0, 0)
+        target = {
+            "night": [mix(c["bg0"], black, 0.45), mix(c["bg1"], c["accent2"], 0.18)],
+            "day": [mix(c["accent2"], c["bg1"], 0.25), mix(c["accent2"], white, 0.65)],
+            "sunset": [mix(c["bg1"], c["accent2"], 0.45), mix(c["accent2"], c["accent"], 0.35),
+                       mix(c["accent"], white, 0.45)],
+        }[kind]
+        stops = [(st[0], *mix(st[1:4], target[i], 0.6), st[4]) for i, st in enumerate(stops)]
     g = cairo.LinearGradient(0, 0, 0, h)
     for st in stops:
         g.add_color_stop_rgba(*st)

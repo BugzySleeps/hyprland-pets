@@ -1,6 +1,6 @@
 """The box, big, where you arrange things: drag decorations around (they snap onto the ground),
-drag the corner knob or scroll to resize, drag the ground's top edge to make it thicker or thinner,
-and drag the sky to frame a sky picture (scroll zooms it)."""
+drag the corner knob or Ctrl+scroll to resize, drag the ground's top edge to make it thicker or thinner,
+and drag the sky to frame a sky picture (Ctrl+scroll zooms it)."""
 import math
 
 import cairo
@@ -222,6 +222,8 @@ class SceneEditor(Gtk.DrawingArea):
             self.queue_draw()
 
     def on_scroll(self, _w, ev):
+        if not ev.state & Gdk.ModifierType.CONTROL_MASK:
+            return False     # plain scrolling scrolls the page; Ctrl+scroll resizes/zooms
         ok, _dx, dy = ev.get_scroll_deltas()
         if not ok:
             dy = {Gdk.ScrollDirection.UP: -1, Gdk.ScrollDirection.DOWN: 1}.get(ev.direction, 0)
@@ -350,13 +352,13 @@ class SceneEditor(Gtk.DrawingArea):
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
         cr.set_font_size(11.5)
         if self.selected() is not None:
-            text = "Drag to move (snaps onto the ground)  ·  corner knob or scroll to resize  ·  arrows nudge  ·  F mirrors"
+            text = "Drag to move (snaps onto the ground)  ·  corner knob or Ctrl+scroll to resize  ·  arrows nudge  ·  F mirrors"
         else:
             parts = ["Click a decoration to move it"]
             if self.box["ground"] != "none":
                 parts.append("drag the ground's top edge to change its height")
             if self.sky_picture():
-                parts.append("drag the sky to frame it, scroll to zoom")
+                parts.append("drag the sky to frame it, Ctrl+scroll to zoom")
             text = "  ·  ".join(parts)
         ext = cr.text_extents(text)
         cr.set_source_rgba(*c["fg"], 0.5)

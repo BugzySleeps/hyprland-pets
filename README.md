@@ -14,6 +14,7 @@ customisable from a settings window: the box's scene, the pet's accessories, and
 
 ## Features
 
+- **Name it.** Set your pet's name in settings.
 - **Any picture as your pet.** PNGs with transparency look best; solid backgrounds can be cut out
   automatically. Size, facing direction and a white sticker outline are adjustable.
 - **A scene you arrange yourself.** Ten built-in decorations (sun/moon, clouds, stars, trees,
@@ -22,7 +23,7 @@ customisable from a settings window: the box's scene, the pet's accessories, and
   edge to raise or lower it. Five grounds and five skies built in, tinted to your theme or in
   natural colours.
 - **Your own pictures everywhere.** Use any image as a decoration, as the ground (it repeats
-  across) or as the sky (drag to pan, scroll to zoom).
+  across) or as the sky (drag to pan, Ctrl+scroll to zoom).
 - **Accessories.** 16 built-in ones (top hat, party hat, crown, cowboy hat, beanie, wizard hat,
   chef hat, grad cap, viking helmet, halo, devil horns, sunglasses, nerd glasses, bow tie, bow,
   flower) plus your own pictures. Fit them in the fitting room: drag, resize and rotate until
@@ -34,12 +35,41 @@ customisable from a settings window: the box's scene, the pet's accessories, and
   to the bottom and walks along inside, moves and resizes with the window, hides behind windows
   stacked over it, and disappears with it when you switch workspace. Drop it above a window
   instead and it stands on top, same as always. Grab it to take it back out.
-- **A falling pose.** Throw Larry or pick him up and he stands up and throws his front legs in the air. Other
+- **Idle behaviours.**
+  - Bring the mouse close and it stops and turns to look at it; Larry's eyes follow the cursor.
+  - Larry sits down now and then.
+  - Leave the mouse alone for a while and it falls asleep, with little z's floating up. Bring the
+    mouse close to wake it.
+  - Each one can be turned off on the Fun page.
+- **Reacts to downloads finishing.** When a package manager finishes, the pet hops with hearts and a
+  bubble saying what finished, or slumps if it failed. That includes apt/nala, pacman, AUR helpers
+  (yay, paru, pikaur…), emerge, dnf, zypper, xbps, apk, flatpak, snap, nix, brew, pip/pipx and
+  cargo, on any distro. It also cheers when a browser, wget or aria2 download lands in your
+  Downloads folder.
+  - Telling success from failure needs a readable log: pacman's and apt's are; on Gentoo, add
+    yourself to the `portage` group. Without one, it assumes success.
+- **Catch game.** Throw your pet up and catch it on the way down for +1. Bounce it off a side of the
+  screen (or a window) first for +2, or off two sides (a wall, then the top) for +3: every different side adds a
+  point. Catches only count in a row: let it land and the streak is over. Your best is kept and shown in the corner of the box,
+  with the live streak next to it.
+- **Sounds.** Throw Larry and he moos (seven different moos, picked at random).
+  Other pets get a muffled, Kenny-style "weee!" (eight of them). There's a blip when you catch it. Off by
+  default: turn on **Pet sounds** on the Fun page.
+- **A falling pose.** Throw Larry or pick him up and he stands up and throws his front legs in the air, and while you hold him he waddles all four legs. With the falling pose off he stays on all fours and paddles his legs in the air instead. Other
   pets can get one too: pick any picture as the falling pose in settings.
+- **Themes.** Dark (the default), Light, Gruvbox, Evergreen, Nord, Catppuccin, Tokyo Night,
+  Dracula, Rosé Pine, Solarized Light and Cherry Blossom, or Desktop to follow your GTK theme.
+  Themes colour the settings window, the box and the tab, and switch live.
+- **Types in your terminal** (off by default). While it naps in a terminal and you're away, it wakes up
+  now and then and types something silly there ("u there?", "brb eating grass"...). Larry sits on his
+  butt with a mini keyboard on his lap. The text only appears on screen, the way `write` messages
+  do: it's never typed into your shell, and only shows up at a prompt, never over a running program.
 - **Tab on any screen edge,** anywhere along it.
-- **Physics.** Throw the pet and it flies, bounces and lands on whatever window is under it.
+- **Physics.** Throw the pet and it flies, bounces off the screen edges and the sides and bottoms of
+  windows, and lands on whatever window is under it.
 - **Stays out of the way.** Clicks go straight through to your windows everywhere except the
   tab, the box and the pet. Hidden in fullscreen. One small Python process.
+- **Searchable settings.** Type in the search box (or press Ctrl+F) to find any setting and jump to it.
 - **Satisfying settings window,** with a live preview and soft synthesized click and tick sounds
   (they can be turned off).
 
@@ -117,6 +147,7 @@ windowrule = float, class:^(larry)$
 | Hover the tab | the box slides out |
 | Click the tab | keep the box open |
 | Right-click the tab, the box or the pet | settings |
+| Settings → **Fun** | catch game, sounds, reactions, idle behaviours, falling pose, terminals |
 | Drag the pet out of the box | it's free on your desktop |
 | Drag it onto a terminal and let go | it moves in and walks along the bottom |
 | Drag it back into the open box | put it away |
@@ -132,11 +163,12 @@ autostart.
 | `~/.config/larry/config.toml` | all settings; the settings window writes it, but it's readable and hand-editable |
 | `~/.config/larry/animations/` | your saved animation presets |
 | `~/.config/larry/{accessories,decorations,grounds,skies}/` | copies of pictures you added |
-| `~/.cache/larry/` | rendered sprites (safe to delete) |
+| `~/.local/state/larry/game.json` | your catch-game best |
+| `~/.cache/larry/` | rendered sprites and sounds (safe to delete) |
 
-**Theme colours:** if you use the `rice` theme switcher from
-[bugzysdotfiles](https://github.com/BugzySleeps/bugzysdotfiles), the box and the settings window
-follow your current theme. Otherwise they use a neutral dark palette.
+**Theme colours:** pick one under Settings → Themes. With **Desktop**, the box and settings follow
+the `rice` theme switcher from [bugzysdotfiles](https://github.com/BugzySleeps/bugzysdotfiles) if you
+use it (switching rices recolours them live), otherwise your GTK theme.
 
 ## Uninstall
 
@@ -163,7 +195,11 @@ src/curve_editor.py  the graph editor
 src/sprites.py       turns a picture into the walking sprite
 src/library.py       your own pictures
 src/sounds.py        synthesized UI sounds
+src/watch.py         notices package managers and downloads finishing
+src/termchat.py      the pet's messages in your terminal
+src/themes.py        colour themes
 src/config.py        settings file
+tools/make_falling_larry.py  draws Larry's falling and held (waddling) poses
 ```
 
 ## License

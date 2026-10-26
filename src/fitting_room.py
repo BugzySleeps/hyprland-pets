@@ -1,5 +1,5 @@
 """The big pet you dress up: click an accessory to pick it, drag it around, drag the corner knob to
-resize, the top knob to rotate; scroll resizes, Shift+scroll rotates, arrow keys nudge."""
+resize, the top knob to rotate; Ctrl+scroll resizes, Ctrl+Shift+scroll rotates, arrow keys nudge."""
 import math
 
 import cairo
@@ -184,8 +184,8 @@ class FittingRoom(Gtk.DrawingArea):
 
     def on_scroll(self, _w, ev):
         acc_id = self.sel if self.sel in self.items else None
-        if not acc_id:
-            return False
+        if not acc_id or not ev.state & Gdk.ModifierType.CONTROL_MASK:
+            return False     # plain scrolling scrolls the page; Ctrl+scroll resizes, Ctrl+Shift rotates
         ok, _dx, dy = ev.get_scroll_deltas()
         if not ok:
             dy = {Gdk.ScrollDirection.UP: -1, Gdk.ScrollDirection.DOWN: 1}.get(ev.direction, 0)
@@ -313,7 +313,7 @@ class FittingRoom(Gtk.DrawingArea):
         if not items:
             text = "Pick something from the wardrobe below"
         elif self.sel in items:
-            text = "Drag to move  ·  corner knob or scroll to resize  ·  top knob or Shift+scroll to rotate  ·  arrows nudge"
+            text = "Drag to move  ·  corner knob or Ctrl+scroll to resize  ·  top knob or Ctrl+Shift+scroll to rotate  ·  arrows nudge"
         else:
             text = "Click an accessory to adjust it"
         ext = cr.text_extents(text)
