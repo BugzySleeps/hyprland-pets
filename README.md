@@ -63,16 +63,37 @@ customisable from a settings window: the box's scene, the pet's accessories, and
 
 ## Install
 
+One line, run in a terminal inside Hyprland:
+
 ```sh
-git clone https://github.com/BugzySleeps/hyprland-pets.git
-cd hyprland-pets
-./install.sh
+curl -fsSL https://github.com/BugzySleeps/hyprland-pets/releases/latest/download/install.sh | bash
 ```
 
-`install.sh` checks the dependencies and links `hyprland-pets` into `~/.local/bin`, pointing
-back at the repo, so a `git pull` is all it takes to update.
+The installer:
 
-Then start it with Hyprland, and float the settings window:
+- downloads hyprland-pets to `~/.local/share/hyprland-pets`
+- installs any missing packages on Arch, Debian/Ubuntu, Fedora and Gentoo
+- puts `hyprland-pets` on your PATH
+- adds it to your Hyprland config so it starts with Hyprland
+- starts it
+
+It asks before using sudo or changing your config, and backs the config up first. Run the same
+line again to update; your settings are never touched.
+
+Options go after `bash -s --`, for example `curl -fsSL … | bash -s -- --yes`:
+
+| | |
+|---|---|
+| `--yes` | don't ask, answer yes to everything |
+| `--no-deps` | only check the packages, don't install them |
+| `--no-config` | leave your Hyprland config alone |
+| `--uninstall` | remove it again |
+
+**From a clone instead:** `git clone https://github.com/BugzySleeps/hyprland-pets.git && cd hyprland-pets && ./install.sh`
+runs it from the clone, so `git pull` updates it.
+
+**Doing it by hand:** install the packages above, link `hyprland-pets` onto your PATH, and add
+it to your config:
 
 **hyprland.lua**
 ```lua
@@ -120,15 +141,17 @@ follow your current theme. Otherwise they use a neutral dark palette.
 ## Uninstall
 
 ```sh
-rm ~/.local/bin/hyprland-pets
-rm -r ~/.config/larry ~/.cache/larry   # settings and pictures, if you don't want them
+curl -fsSL https://github.com/BugzySleeps/hyprland-pets/releases/latest/download/install.sh | bash -s -- --uninstall
 ```
+
+This removes the program and the lines it added to your Hyprland config. Your settings stay in
+`~/.config/larry`; delete that folder and `~/.cache/larry` too if you don't want them.
 
 ## Project layout
 
 ```
 hyprland-pets        launcher
-install.sh           dependency check + install
+install.sh           one-step installer / updater / uninstaller
 src/larry.py         the pet: overlay window, physics, Hyprland IPC
 src/settings.py      the settings window
 src/scene.py         the box: sky, ground, decorations
