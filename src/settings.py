@@ -282,6 +282,40 @@ class Settings(Gtk.Window):
             c.pack_start(self.setting_row(text, sw, sub), False, False, 0)
             self.switches[key] = sw
         page.pack_start(c, False, False, 0)
+
+        c = self.card("Falling", "A different picture while it's thrown, falling or held")
+        self.fall_switch = Gtk.Switch(active=self.cfg["fall_image"] != "none", halign=Gtk.Align.END,
+                                      valign=Gtk.Align.CENTER)
+        self.fall_switch.connect("notify::active", self.on_fall_switch)
+        c.pack_start(self.setting_row("Falling pose", self.fall_switch,
+                                      "Larry stands up with his arms in the air (other pets need a picture below)"), False, False, 0)
+        row = Gtk.Box(spacing=8)
+        self.fall_chooser = Gtk.FileChooserButton(title="Choose a falling picture", action=Gtk.FileChooserAction.OPEN)
+        self.fall_chooser.add_filter(filt)
+        if pictures.is_dir():
+            self.fall_chooser.set_current_folder(str(pictures))
+        self.fall_chooser.connect("file-set", self.on_fall_image)
+        row.pack_start(self.fall_chooser, True, True, 0)
+        back = icon_button("Larry's", "view-refresh-symbolic", "Back to Larry's arms-up pose")
+        back.connect("clicked", self.on_fall_reset)
+        row.pack_start(back, False, False, 0)
+        c.pack_start(self.setting_row("Falling picture", row, "Drawn centred on the pet, no accessories"),
+                     False, False, 0)
+        self.show_fall_image()
+        page.pack_start(c, False, False, 0)
+
+        c = self.card("Terminals", "Drag your pet onto a terminal and let go: it moves in and walks along the "
+                                   "bottom. Drop it above a window instead to stand on top")
+        self.term_switch = Gtk.Switch(active=self.cfg["terminals"]["enabled"], halign=Gtk.Align.END,
+                                      valign=Gtk.Align.CENTER)
+        self.term_switch.connect("notify::active", self.on_term_switch)
+        c.pack_start(self.setting_row("Live in terminals", self.term_switch, "Grab it again to take it back out"),
+                     False, False, 0)
+        self.term_classes = Gtk.Entry(text=", ".join(self.cfg["terminals"]["classes"]), hexpand=True)
+        self.term_classes.connect("changed", self.on_term_classes)
+        c.pack_start(self.setting_row("Terminal apps", self.term_classes,
+                                      "Window classes, comma separated (hyprctl clients shows them)"), False, False, 0)
+        page.pack_start(c, False, False, 0)
         return page
 
     def box_page(self):
@@ -1085,6 +1119,11 @@ class Settings(Gtk.Window):
         self.size.set_value(cfg["size"])
         for key, sw in self.switches.items():
             sw.set_active(cfg[key])
+        self.term_switch.set_active(cfg["terminals"]["enabled"])
+        self.fall_switch.set_active(cfg["fall_image"] != "none")
+        self.show_fall_image()
+        if [c.strip() for c in self.term_classes.get_text().split(",") if c.strip()] != cfg["terminals"]["classes"]:
+            self.term_classes.set_text(", ".join(cfg["terminals"]["classes"]))
         for which, key in (("ground", "ground"), ("sky", "background")):
             if cfg["box"][key] not in self.choice_buttons[which]:
                 self.fill_choice(which)
@@ -1174,6 +1213,53 @@ class Settings(Gtk.Window):
         self.size_timer = None
         self.apply()
         return False
+
+    def show_fall_image(self):
+        v = self.cfg["fall_image"]
+        if v in ("auto", "none"):
+            self.fall_chooser.set_filename(str(sprites.LARRY_FALLING))
+        else:
+            self.fall_chooser.set_filename(v)
+
+    def on_fall_switch(self, sw, _p):
+        if self.syncing:
+            return
+        if not sw.get_active():
+            self.cfg["fall_image"] = "none"
+        elif self.cfg["fall_image"] == "none":
+            path = self.fall_chooser.get_filename()
+            custom = path and Path(path).resolve() != sprites.LARRY_FALLING
+            self.cfg["fall_image"] = path if custom else "auto"
+        self.apply()
+
+    def on_fall_image(self, chooser):
+        path = chooser.get_filename()
+        if self.syncing or not path:
+            return
+        self.cfg["fall_image"] = "auto" if Path(path).resolve() == sprites.LARRY_FALLING else path
+        self.syncing = True
+        self.fall_switch.set_active(True)
+        self.syncing = False
+        self.apply()
+
+    def on_fall_reset(self, _b):
+        self.cfg["fall_image"] = "auto"
+        self.syncing = True
+        self.fall_switch.set_active(True)
+        self.show_fall_image()
+        self.syncing = False
+        self.apply()
+
+    def on_term_switch(self, sw, _p):
+        if not self.syncing:
+            self.cfg["terminals"]["enabled"] = sw.get_active()
+            self.apply()
+
+    def on_term_classes(self, entry):
+        if self.syncing:
+            return
+        self.cfg["terminals"]["classes"] = [c.strip() for c in entry.get_text().split(",") if c.strip()]
+        self.scene_apply_soon()   # saves once you pause typing
 
     def on_switch(self, sw, _param, key):
         if not self.syncing and self.cfg[key] != sw.get_active():

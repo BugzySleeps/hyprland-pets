@@ -20,9 +20,15 @@ DEFAULTS = {
     "faces_left": False,               # the image's character looks left (so walking flips correctly)
     "remove_bg": False,                # flood-fill the solid background away (for images without transparency)
     "outline": True,                   # white sticker outline, so dark images show on dark windows
+    "fall_image": "auto",              # picture while falling or held: auto | none | a path
     "tab": {
         "edge": "top",                 # top | bottom | left | right
         "position": 72,                # % along that edge (left->right, or top->bottom)
+    },
+    "terminals": {
+        "enabled": True,               # drag the pet onto a terminal to put it inside
+        "classes": ["kitty", "Alacritty", "foot", "org.wezfurlong.wezterm", "com.mitchellh.ghostty",
+                    "konsole", "org.gnome.Ptyxis", "org.gnome.Console", "xterm", "st", "urxvt"],
     },
     "sounds": True,                    # clicks and ticks in the settings window
     "volume": 70,                      # 0-100
@@ -49,8 +55,11 @@ COMMENTS = {
     "faces_left": "true if the character in the image looks to the left",
     "remove_bg": "cut out a solid-colour background (for images without transparency)",
     "outline": "white sticker outline around the image",
+    "fall_image": "picture while falling or held: auto (Larry's arms-up pose when the pet is Larry), none, or a path",
     "edge": "screen edge the tab sits on: top | bottom | left | right",
     "position": "where along that edge, in % (left to right / top to bottom)",
+    "enabled": "the pet can live inside terminals (drag it onto one)",
+    "classes": "window classes that count as terminals (hyprctl clients shows them)",
     "sounds": "click and tick sounds in the settings window",
     "volume": "sound volume (0-100)",
     "ground": "grass | dirt | sand | snow | stone | none, or img-<name> for ~/.config/larry/grounds/<name>.png",
@@ -109,6 +118,12 @@ def load():
     if isinstance(pos, (int, float)) and not isinstance(pos, bool):
         cfg["tab"]["position"] = max(0, min(100, round(pos)))
 
+    uterm = user.get("terminals") if isinstance(user.get("terminals"), dict) else {}
+    if isinstance(uterm.get("enabled"), bool):
+        cfg["terminals"]["enabled"] = uterm["enabled"]
+    if isinstance(uterm.get("classes"), list):
+        cfg["terminals"]["classes"] = [c for c in uterm["classes"] if isinstance(c, str) and c.strip()]
+
     uanim = user.get("animation") if isinstance(user.get("animation"), dict) else {}
     preset = uanim.get("preset") if isinstance(uanim.get("preset"), str) else "Default"
     cfg["animation"] = {"preset": preset, **anim.clean(uanim)}
@@ -118,6 +133,10 @@ def load():
     cfg["image"] = os.path.expanduser(cfg["image"])
     if not Path(cfg["image"]).is_file():
         cfg["image"] = DEFAULTS["image"]
+    if cfg["fall_image"] not in ("auto", "none"):
+        cfg["fall_image"] = os.path.expanduser(cfg["fall_image"])
+        if not Path(cfg["fall_image"]).is_file():
+            cfg["fall_image"] = "auto"
     cfg["size"] = max(SIZE_MIN, min(SIZE_MAX, cfg["size"]))
     cfg["volume"] = max(0, min(100, cfg["volume"]))
     return cfg

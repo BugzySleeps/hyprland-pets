@@ -12,6 +12,10 @@ import accessories
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "larry"
 PAD = 3
 KEY = (255, 0, 254)  # flood-fill marker for background removal
+HERE = Path(__file__).resolve().parent
+LARRY = HERE / "larry.png"
+LARRY_FALLING = HERE / "larry-falling.png"
+LARRY_FALL_SCALE = 1.625  # upright with his arms up he's taller than standing; same head size
 
 
 def remove_background(im, tolerance=48):
@@ -56,7 +60,7 @@ def base(cfg, height):
 
 def head_anchor(cfg):
     """Roughly where the top of the pet's head is (x, y as fractions), for placing new accessories."""
-    if Path(cfg["image"]).resolve() == (Path(__file__).resolve().parent / "larry.png"):
+    if Path(cfg["image"]).resolve() == LARRY:
         return accessories.LARRY_ANCHOR
     try:
         alpha = Image.open(base(cfg, 120)).getchannel("A")
@@ -131,6 +135,60 @@ def load(cfg, scale=1):
         for surf in surfaces:
             surf.set_device_scale(scale, scale)
     return surfaces
+
+
+def fall_source(cfg):
+    """The picture shown while the pet falls or is held, or None to keep the normal one.
+    "auto" means Larry's own falling pose, but only while the pet is Larry."""
+    v = cfg.get("fall_image", "auto")
+    if v == "none":
+        return None
+    if v == "auto":
+        return LARRY_FALLING if Path(cfg["image"]).resolve() == LARRY and LARRY_FALLING.is_file() else None
+    return Path(v) if Path(v).is_file() else None
+
+
+def load_fall(cfg, scale=1):
+    """[facing right, facing left] surfaces for the falling pose, or None. Accessories aren't
+    drawn on it: they're fitted to the standing picture and wouldn't line up."""
+    src = fall_source(cfg)
+    if not src:
+        return None
+    sub = {"image": str(src), "faces_left": False, "remove_bg": not has_transparency(src)}
+    k = LARRY_FALL_SCALE if src == LARRY_FALLING else 1
+    basep = base(sub, round((cfg["size"] - 2 * PAD) * k * scale))
+    sig = f"{basep.name}|{cfg['outline']}|fall"
+    key = hashlib.sha1(sig.encode()).hexdigest()[:16]
+    out = CACHE / f"{key}-fall-right.png", CACHE / f"{key}-fall-left.png"
+    if not all(p.exists() for p in out):
+        pet = Image.open(basep).convert("RGBA")
+        pad = round(PAD * scale)
+        sprite = Image.new("RGBA", (pet.width + 2 * pad, pet.height + 2 * pad), (255, 255, 255, 0))
+        sprite.alpha_composite(pet, (pad, pad))
+        if cfg["outline"]:
+            halo = sprite.getchannel("A").filter(ImageFilter.MaxFilter(5))
+            sticker = Image.new("RGBA", sprite.size, (255, 255, 255, 0))
+            sticker.putalpha(halo)
+            sticker.alpha_composite(sprite)
+            sprite = sticker
+        sprite.save(out[0])
+        sprite.transpose(Image.FLIP_LEFT_RIGHT).save(out[1])
+    surfaces = [cairo.ImageSurface.create_from_png(str(p)) for p in out]
+    if scale != 1:
+        for surf in surfaces:
+            surf.set_device_scale(scale, scale)
+    return surfaces
+
+
+def draw_centered(cr, sprite, cx, cy, tilt):
+    """Sprite centred on (cx, cy), spun by tilt (the falling pose has no feet to stand on)."""
+    w, h = logical_size(sprite)
+    cr.save()
+    cr.translate(cx, cy)
+    cr.rotate(tilt)
+    cr.set_source_surface(sprite, -w / 2, -h / 2)
+    cr.paint()
+    cr.restore()
 
 
 def has_transparency(path):

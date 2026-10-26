@@ -30,6 +30,12 @@ customisable from a settings window: the box's scene, the pet's accessories, and
 - **Animation you shape with graphs.** Walk speed, step length, tilt, bob, squash, wandering,
   gravity, throwing and bounciness, plus curves you drag to shape each step and the box opening.
   Five presets built in; save your own and switch between them.
+- **It can move into your terminals.** Drag the pet onto a terminal window and let go: it drops
+  to the bottom and walks along inside, moves and resizes with the window, hides behind windows
+  stacked over it, and disappears with it when you switch workspace. Drop it above a window
+  instead and it stands on top, same as always. Grab it to take it back out.
+- **A falling pose.** Throw Larry or pick him up and he stands up and throws his front legs in the air. Other
+  pets can get one too: pick any picture as the falling pose in settings.
 - **Tab on any screen edge,** anywhere along it.
 - **Physics.** Throw the pet and it flies, bounces and lands on whatever window is under it.
 - **Stays out of the way.** Clicks go straight through to your windows everywhere except the
@@ -91,6 +97,7 @@ windowrule = float, class:^(larry)$
 | Click the tab | keep the box open |
 | Right-click the tab, the box or the pet | settings |
 | Drag the pet out of the box | it's free on your desktop |
+| Drag it onto a terminal and let go | it moves in and walks along the bottom |
 | Drag it back into the open box | put it away |
 | `hyprland-pets --settings` | open settings from a keybind or script |
 

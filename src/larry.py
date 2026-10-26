@@ -110,6 +110,7 @@ class Larry(Gtk.Window):
 
         self.cfg = config.load()
         self.sprites = sprites.load(self.cfg)
+        self.fall_sprites = self.load_fall(self.cfg)
         self.lw, self.lh = self.sprites[0].get_width(), self.sprites[0].get_height()
         self.anim = anim.Compiled(self.cfg["animation"])
         self.walking = False
@@ -133,6 +134,12 @@ class Larry(Gtk.Window):
         self.pause = 0.0          # seconds left standing still
         self.platform = None      # (address, left, right, top) he's standing on
         self.platforms = []
+        self.clients = {}         # address -> Hyprland client, from the last refresh
+        self.mon = None           # the monitor we're drawn on
+        self.room = None          # address of the terminal he lives in (dragged into it), or None
+        self.room_rect = None     # its inside: (left, top, right, bottom) on screen
+        self.room_shown = True    # False while that terminal is on a workspace you're not looking at
+        self.room_covers = []     # windows stacked above his terminal: he's hidden behind them
         self.poller = None
         self.drag_off = (0, 0)
         self.drag_hist = []
@@ -261,7 +268,7 @@ class Larry(Gtk.Window):
             rects = [self.to_edge(self.tab_rect(), 5)]
             if self.open > 0.05:
                 rects.append(self.visible_box())
-            if self.mode == "free":
+            if self.mode == "free" and (not self.room or self.room_shown):
                 rects.append(tuple(round(v) for v in self.larry_rect()))
         key = tuple(tuple(int(v) for v in r) for r in rects)
         if key == self.input_key:
@@ -301,6 +308,7 @@ class Larry(Gtk.Window):
             self.drag_off = (ev.x - lx, ev.y - ly)
             self.drag_hist = [(ev.time, ev.x, ev.y)]
             self.mode, self.platform = "drag", None
+            self.leave_room()
         elif self.inside(p, self.tab_rect(), 4):
             self.pinned = not self.pinned
         self.update_input()
@@ -315,6 +323,12 @@ class Larry(Gtk.Window):
             self.damage_larry()
             self.mode = "box"
             self.bx = min(max(self.x - bx, 6), self.box_w - self.lw - 6)
+        elif (term := self.terminal_at(self.pointer)):
+            self.mode, self.platform = "free", None
+            self.room, self.room_rect = term, None
+            self.vx = self.vy = 0          # set down gently, then he drops to the bottom
+            self.update_room()
+            self.restart_poller()
         else:
             # throw: velocity from the last few motion samples
             (t0, x0, y0), (t1, x1, y1) = self.drag_hist[0], self.drag_hist[-1]
@@ -374,9 +388,14 @@ class Larry(Gtk.Window):
         mon = next((m for m in mons if m.get("focused")), mons[0] if mons else None)
         if not mon:
             return
+        self.mon = mon
         ws = mon["activeWorkspace"]["id"]
         plats = []
-        for c in hypr("clients") or []:
+        clients = hypr("clients") or []
+        self.clients = {c["address"]: c for c in clients}
+        if self.room:
+            self.update_room()
+        for c in clients:
             if c["workspace"]["id"] != ws or not c.get("mapped", True) or c.get("hidden"):
                 continue
             x, y = c["at"][0] - mon["x"], c["at"][1] - mon["y"]
@@ -393,7 +412,99 @@ class Larry(Gtk.Window):
         self.refresh_platforms()
         return True
 
+    def restart_poller(self):
+        """Poll faster while he lives in a terminal, so he keeps up when you move it."""
+        if self.poller:
+            GLib.source_remove(self.poller)
+            self.poller = None
+        self.wake()
+
+    # ── terminals: he can live inside one ──────────────────────────────────
+    def is_terminal(self, c):
+        t = self.cfg["terminals"]
+        names = {n.lower() for n in t["classes"]}
+        return t["enabled"] and (c.get("class", "").lower() in names or c.get("initialClass", "").lower() in names)
+
+    def visible_here(self, c):
+        return (self.mon and c["workspace"]["id"] == self.mon["activeWorkspace"]["id"]
+                and c.get("mapped", True) and not c.get("hidden"))
+
+    def terminal_at(self, p):
+        """The terminal under the pointer when he's let go (topmost window there), if it is one."""
+        if not self.cfg["terminals"]["enabled"] or not p:
+            return None
+        self.refresh_platforms()
+        if not self.mon:
+            return None
+        under = []
+        for c in self.clients.values():
+            if not self.visible_here(c):
+                continue
+            x, y = c["at"][0] - self.mon["x"], c["at"][1] - self.mon["y"]
+            w, h = c["size"]
+            if x <= p[0] <= x + w and y + 6 <= p[1] <= y + h:   # the body, not the very top edge
+                under.append(c)
+        if not under:
+            return None
+        top = min(under, key=lambda c: (not c.get("floating"), c.get("focusHistoryID", 99)))
+        return top["address"] if self.is_terminal(top) else None
+
+    def update_room(self):
+        """Follow his terminal: move with it, hide while it's out of sight, fall out if it closes."""
+        c = self.clients.get(self.room)
+        if c is None or not self.is_terminal(c):
+            self.leave_room()
+            self.platform = None       # airborne: he drops onto whatever is below
+            return
+        shown = bool(self.visible_here(c))
+        if shown != self.room_shown:
+            self.damage_larry()
+            self.room_shown = shown
+            self.input_key = None
+        if not shown:
+            return
+        x, y = c["at"][0] - self.mon["x"], c["at"][1] - self.mon["y"]
+        w, h = c["size"]
+        new = (x + 2, y + 2, x + w - 2, y + h - 2)
+        old = self.room_rect
+        if old and old != new:          # the window moved: take him along
+            self.damage_larry()
+            self.x += new[0] - old[0]
+            self.y += new[1] - old[1]
+            self.damage_larry()
+        self.room_rect = new
+        # what's on top of his terminal: floating windows over a tiled one, otherwise whatever
+        # comes later in Hyprland's client list (it's kept in stacking order, bottom to top)
+        covers = []
+        order = list(self.clients)
+        mine = order.index(self.room)
+        for i, o in enumerate(self.clients.values()):
+            if o["address"] == self.room or not self.visible_here(o):
+                continue
+            fo, fc = bool(o.get("floating")), bool(c.get("floating"))
+            above = (fo and not fc) or (fo == fc and i > mine)
+            if above:
+                covers.append((o["at"][0] - self.mon["x"], o["at"][1] - self.mon["y"], *o["size"]))
+        if covers != self.room_covers:
+            self.room_covers = covers
+            self.damage_larry()
+
+    def leave_room(self):
+        if self.room:
+            self.room, self.room_rect, self.room_shown = None, None, True
+            self.input_key = None
+            if self.mode == "free":
+                self.restart_poller()
+
     # ── settings ────────────────────────────────────────────────────────────
+    @staticmethod
+    def load_fall(cfg):
+        try:
+            return sprites.load_fall(cfg)
+        except Exception as e:  # unreadable picture: just keep the normal pose in the air
+            print(f"larry: can't use the falling picture: {e}", file=sys.stderr)
+            return None
+
     def open_settings(self):
         if self.settings:
             self.settings.present()
@@ -405,6 +516,8 @@ class Larry(Gtk.Window):
         """Swap in new settings live (called by the settings window)."""
         self.anim = anim.Compiled(cfg["animation"])
         sprite_keys = ("image", "size", "faces_left", "remove_bg", "outline", "accessories")
+        if any(cfg[k] != self.cfg[k] for k in ("image", "size", "outline", "fall_image")):
+            self.fall_sprites = self.load_fall(cfg)
         if all(cfg[k] == self.cfg[k] for k in sprite_keys):
             new = self.sprites
         else:
@@ -462,7 +575,7 @@ class Larry(Gtk.Window):
             self.last = time.monotonic()
             self.ticking = GLib.timeout_add(1000 // FPS, self.tick)
         if self.mode == "free" and not self.poller:
-            self.poller = GLib.timeout_add(300, self.poll_platforms)
+            self.poller = GLib.timeout_add(120 if self.room else 300, self.poll_platforms)
 
     def damage(self, x, y, w, h, pad=8):
         self.dirty.append((int(x - pad), int(y - pad), int(w + 2 * pad), int(h + 2 * pad)))
@@ -479,7 +592,11 @@ class Larry(Gtk.Window):
         self.wake()
 
     def damage_larry(self):
-        self.damage(*self.larry_rect(), pad=12)
+        pad = 12
+        if self.fall_sprites:   # room for the (taller, wobbling) falling pose
+            fw, fh = sprites.logical_size(self.fall_sprites[0])
+            pad += max(0, math.hypot(fw, fh) - min(self.lw, self.lh) / 2)
+        self.damage(*self.larry_rect(), pad=pad)
 
     def tick(self):
         now = time.monotonic()
@@ -506,6 +623,8 @@ class Larry(Gtk.Window):
             self.damage_larry()
             self.step_free(dt)
             self.damage_larry()
+        elif self.mode == "drag" and self.fall_sprites:
+            self.damage_larry()   # he flails while you hold him
 
         for r in self.dirty:
             self.queue_draw_area(*r)
@@ -541,7 +660,38 @@ class Larry(Gtk.Window):
             self.bx = min(max(self.bx, lo), hi)
             self.dir = 1 if self.bx <= lo else -1
 
+    def step_room(self, dt):
+        """Inside a terminal: the window's bottom is the floor, its sides are walls."""
+        if not self.room_shown or not self.room_rect:
+            return
+        left, top, right, bottom = self.room_rect
+        floor = bottom - self.lh
+        lo, hi = left, max(right - self.lw, left)
+        if self.platform:
+            self.y = floor
+            self.x += self.wander(dt, self.anim.free_speed)
+            if self.x <= lo or self.x >= hi:
+                self.x = min(max(self.x, lo), hi)
+                self.dir = 1 if self.x <= lo else -1
+            return
+        self.walking = False
+        self.vy += self.anim.gravity * dt
+        self.vx *= 0.995
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+        if self.x < lo or self.x > hi:
+            self.x = min(max(self.x, lo), hi)
+            self.vx = -self.vx * self.anim.bounce
+        if self.y < top and self.vy < 0:
+            self.y, self.vy = top, 0
+        if self.y >= floor:
+            self.y, self.vx, self.vy = floor, 0, 0
+            self.platform = ("room", left, right, bottom)
+            self.dir = random.choice((-1, 1))
+
     def step_free(self, dt):
+        if self.room:
+            return self.step_room(dt)
         if self.platform:
             addr, left, right, top = self.platform
             if addr != "floor":   # ride the window he's on; fall if it's gone
@@ -629,7 +779,36 @@ class Larry(Gtk.Window):
             self.draw_larry(cr)
 
     def draw_larry(self, cr):
+        if self.mode == "free" and self.room:
+            if not self.room_shown or not self.room_rect:
+                return
+            left, top, right, bottom = self.room_rect   # stay inside the window, behind anything over it
+            region = cairo.Region(cairo.RectangleInt(round(left), round(top), round(right - left), round(bottom - top)))
+            for r in self.room_covers:
+                region.subtract(cairo.RectangleInt(*(round(v) for v in r)))
+            cr.save()
+            for i in range(region.num_rectangles()):
+                r = region.get_rectangle(i)
+                cr.rectangle(r.x, r.y, r.width, r.height)
+            cr.clip()
+            self._draw_larry(cr)
+            cr.restore()
+            return
+        self._draw_larry(cr)
+
+    def _draw_larry(self, cr):
         x, y = self.larry_pos()
+        airborne = self.mode == "drag" or (self.mode == "free" and not self.platform)
+        if airborne and self.fall_sprites:   # arms up, wobbling
+            t = time.monotonic()
+            if self.mode == "drag":
+                tilt = math.sin(t * 7) * 0.14
+            else:
+                tilt = max(-0.5, min(0.5, self.vx / 1500)) + math.sin(t * 15) * 0.09
+            sprite = self.fall_sprites[0 if self.dir > 0 else 1]
+            fh = sprites.logical_size(sprite)[1]   # hooves where his feet are, arms reaching up
+            sprites.draw_centered(cr, sprite, x + self.lw / 2, y + self.lh - fh / 2 + 2, tilt)
+            return
         tilt, bob, squash = self.anim.pose(self.phase, self.walking)
         tilt *= self.dir              # "forward" is whichever way he's facing
         if self.mode == "drag":
