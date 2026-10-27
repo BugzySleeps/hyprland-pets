@@ -24,10 +24,11 @@ def dump(d, prefix="", comments=None):
     lines = []
     for k, v in d.items():
         if not isinstance(v, dict):
-            if k in comments:
-                lines.append(f"# {comments[k]}")
+            note = comments.get(f"{prefix}{k}", comments.get(k))   # "ride.every" beats "every"
+            if note:
+                lines.append(f"# {note}")
             lines.append(f"{k} = {value(v)}")
-            if k in comments:
+            if note:
                 lines.append("")
     for k, v in d.items():
         if isinstance(v, dict):

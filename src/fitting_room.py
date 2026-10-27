@@ -231,7 +231,7 @@ class FittingRoom(Gtk.DrawingArea):
     def on_draw(self, _w, cr):
         c = self.colors()
         w, h = self.get_allocated_width(), self.get_allocated_height()
-        r = 16
+        r = 20
         cr.new_sub_path()
         cr.arc(w - r, r, r, -math.pi / 2, 0)
         cr.arc(w - r, h - r, r, 0, math.pi / 2)
@@ -239,16 +239,13 @@ class FittingRoom(Gtk.DrawingArea):
         cr.arc(r, r, r, math.pi, 3 * math.pi / 2)
         cr.close_path()
         cr.clip()
-        g = cairo.LinearGradient(0, 0, 0, h)
-        g.add_color_stop_rgb(0, *c["bg1"])
-        g.add_color_stop_rgb(1, *[v * 0.75 for v in c["bg0"]])
-        cr.set_source(g)
+        cr.set_source_rgb(*[a + (b - a) * 0.05 for a, b in zip(c["bg1"], c["fg"])])   # a flat, slightly raised well
         cr.paint()
-        spot = cairo.RadialGradient(w / 2, h * 0.5, 10, w / 2, h * 0.5, w * 0.4)
-        spot.add_color_stop_rgba(0, *c["accent2"], 0.2)
-        spot.add_color_stop_rgba(1, *c["accent2"], 0)
-        cr.set_source(spot)
-        cr.paint()
+        cr.set_source_rgba(*c["fg"], 0.06)
+        for x in range(14, w, 20):
+            for y in range(14, h, 20):
+                cr.arc(x, y, 1, 0, 2 * math.pi)
+                cr.fill()
 
         ox, oy, pw, ph = self.view()
         # a little stage: floor line and a shadow under the feet

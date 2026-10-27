@@ -18,6 +18,7 @@ LARRY = HERE / "larry.png"
 LARRY_FALLING = HERE / "larry-falling.png"
 LARRY_HELD = HERE / "larry-held.png"     # made by tools/make_falling_larry.py, with larry-held.json
 LARRY_TYPING = HERE / "larry-typing.png"
+LARRY_RIDING = HERE / "larry-riding.png"   # sitting on a vehicle, pedalling (+ seat / pedal points)
 LARRY_FALL_SCALE = 1.625  # upright with his arms up he's taller than standing; same head size
 
 
@@ -373,9 +374,10 @@ def load_fall(cfg, scale=1):
     return surfaces
 
 
-def load_sheet(cfg, sheet, tag, scale=1):
+def load_sheet(cfg, sheet, tag, scale=1, decorate=None):
     """Frames from one of Larry's drawn animation sheets (made by tools/make_falling_larry.py, with a
-    .json beside it) at this pet size: a list of [right, left] cairo surfaces."""
+    .json beside it) at this pet size: a list of [right, left] cairo surfaces. decorate(frame), if
+    given, changes each resized frame before the outline goes on (and `tag` must say how)."""
     meta = json.loads(sheet.with_suffix(".json").read_text())
     n, fw, fh = meta["frames"], meta["frame_w"], meta["frame_h"]
     height = round((cfg["size"] - 2 * PAD) * meta["scale"] * scale)
@@ -390,6 +392,8 @@ def load_sheet(cfg, sheet, tag, scale=1):
                 CACHE.mkdir(parents=True, exist_ok=True)
             frame = img.crop((i * fw, 0, (i + 1) * fw, fh))
             frame = frame.resize((max(1, round(fw * height / fh)), height), Image.LANCZOS)
+            if decorate:
+                frame = decorate(frame)
             pad = round(PAD * scale)
             sprite = Image.new("RGBA", (frame.width + 2 * pad, frame.height + 2 * pad), (255, 255, 255, 0))
             sprite.alpha_composite(frame, (pad, pad))
@@ -416,6 +420,48 @@ def load_typing(cfg, scale=1):
     if not is_larry(cfg) or not LARRY_TYPING.is_file():
         return None
     return load_sheet(cfg, LARRY_TYPING, "typing-1", scale)
+
+
+def load_riding(cfg, scale=1):
+    """Larry sitting on a vehicle, side on: (frames, meta) or None (other pets stand on it).
+    meta["seat"] / meta["crank"] are his butt and the pedals' middle, as fractions of a frame."""
+    if not is_larry(cfg) or not LARRY_RIDING.is_file():
+        return None
+    meta = json.loads(LARRY_RIDING.with_suffix(".json").read_text())
+    items = cfg.get("accessories", {})
+    if not items or "pet_box" not in meta:
+        return load_sheet(cfg, LARRY_RIDING, "riding-1", scale), meta
+    # his accessories, fitted to the standing picture, go on the same head here: the frame grows
+    # for whatever sticks out, and the seat / pedal points move with it
+    height = round((cfg["size"] - 2 * PAD) * meta["scale"] * scale)
+    fw = max(1, round(meta["frame_w"] * height / meta["frame_h"]))
+    bx0, by0, bx1, by1 = meta["pet_box"]
+    px, py = bx0 * fw, by0 * height
+    pw, ph = (bx1 - bx0) * fw, (by1 - by0) * height
+    left, top, right = accessories.extent(items, pw, ph)
+    gl = math.ceil(max(0, -(px + left)))
+    gt = math.ceil(max(0, -(py + top)))
+    gr = math.ceil(max(0, px + right - fw))
+
+    def decorate(frame):
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, frame.width + gl + gr, frame.height + gt)
+        cr = cairo.Context(surf)
+        cr.translate(gl + px, gt + py)
+        accessories.draw(cr, items, pw, ph, behind=True)
+        cr.identity_matrix()
+        cr.set_source_surface(to_surface(frame), gl, gt)
+        cr.paint()
+        cr.translate(gl + px, gt + py)
+        accessories.draw(cr, items, pw, ph, behind=False)
+        return to_pil(surf)
+
+    W, H = fw + gl + gr, height + gt
+    meta = {**meta,
+            "seat": [(meta["seat"][0] * fw + gl) / W, (meta["seat"][1] * height + gt) / H],
+            "crank": [(meta["crank"][0] * fw + gl) / W, (meta["crank"][1] * height + gt) / H],
+            "pedal": meta["pedal"] * height / H}
+    tag = "riding-acc-" + hashlib.sha1(accessories.signature(items).encode()).hexdigest()[:10]
+    return load_sheet(cfg, LARRY_RIDING, tag, scale, decorate), meta
 
 
 def draw_centered(cr, sprite, cx, cy, tilt):

@@ -131,14 +131,14 @@ class CurveEditor(Gtk.DrawingArea):
         w, h = self.get_allocated_width(), self.get_allocated_height()
         _label, cyclic, (lo, hi), _help, _default = self.spec
 
-        r = 10
+        r = 18
         cr.new_sub_path()
         cr.arc(w - r, r, r, -math.pi / 2, 0)
         cr.arc(w - r, h - r, r, 0, math.pi / 2)
         cr.arc(r, h - r, r, math.pi / 2, math.pi)
         cr.arc(r, r, r, math.pi, 3 * math.pi / 2)
         cr.close_path()
-        cr.set_source_rgb(*c["bg1"])
+        cr.set_source_rgb(*[a + (b - a) * 0.05 for a, b in zip(c["bg1"], c["fg"])])
         cr.fill()
 
         # grid: quarter steps across, the zero line (and the "fully open" line)

@@ -19,12 +19,15 @@ import library  # noqa: E402
 import scene  # noqa: E402
 import sounds  # noqa: E402
 import themes  # noqa: E402
+import fonts  # noqa: E402
 import sprites  # noqa: E402
+import vehicles  # noqa: E402
 from curve_editor import CurveEditor  # noqa: E402
 from fitting_room import FittingRoom  # noqa: E402
 from scene_editor import SceneEditor  # noqa: E402
 
 ZOOM = 1.7  # the big preview's magnification
+NAV_GROUPS = [("Your pet", ["pet", "acc", "anim", "fun"]), ("Around it", ["box", "theme"])]
 PAGES = [
     ("pet", "Pet", "face-smile-symbolic", "Who lives in the box, and how they look"),
     ("box", "Box", "weather-clear-symbolic", "The little world your pet walks around in"),
@@ -62,6 +65,30 @@ def css_class(widget, *names):
     return widget
 
 
+class Squiggle(Gtk.DrawingArea):
+    """A wavy divider line (after section and card titles)."""
+
+    def __init__(self, colors, alpha=0.32):
+        super().__init__(hexpand=True, valign=Gtk.Align.CENTER)
+        self.colors, self.alpha = colors, alpha
+        self.set_size_request(24, 10)
+        self.connect("draw", self.on_draw)
+
+    def on_draw(self, _w, cr):
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        c = self.colors()
+        cr.set_source_rgba(*c["fg"], self.alpha)
+        cr.set_line_width(1.6)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        amp, period = 2.4, 11.0
+        x = 2.0
+        cr.move_to(x, h / 2)
+        while x < w - 2:
+            x += 1
+            cr.line_to(x, h / 2 + amp * math.sin((x - 2) / period * 2 * math.pi))
+        cr.stroke()
+
+
 def icon_button(text, icon, tip=None):
     b = Gtk.Button(label=f"  {text}")
     b.set_image(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
@@ -93,35 +120,52 @@ class Settings(Gtk.Window):
         self.building = None
         self.connect("key-press-event", self.on_window_key)
 
-        root = Gtk.Box()
+        self.squiggles = []
+        root = Gtk.Box(spacing=10, margin=10)
         self.add(root)
         root.pack_start(self.sidebar(), False, False, 0)
-        root.pack_start(self.main_area(), True, True, 0)
+        root.pack_start(css_class(self.main_area(), "main-panel"), True, True, 0)
 
         self.hook_sounds(self)
         self.show_all()
+        self.set_focus(None)          # don't start typing in the search box
         self.on_curve_pick(None)
         self.ticker = GLib.timeout_add(1000 // 30, self.animate)
         self.syncing = False
 
     # ── layout ──────────────────────────────────────────────────────────────
-    def sidebar(self):
-        side = css_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), "sidebar")
-        side.set_size_request(236, -1)
+    def squiggle(self, alpha=0.32):
+        sq = Squiggle(lambda: self.pet.colors, alpha)
+        self.squiggles.append(sq)
+        return sq
 
-        brand = Gtk.Box(spacing=12, margin_bottom=22)
+    def section(self, title, extra=None):
+        """A small heading with a wavy line after it, like "Your pet ~~~~~"."""
+        row = css_class(Gtk.Box(spacing=10), "section")
+        row.pack_start(label(title, "section-label"), False, False, 0)
+        row.pack_start(self.squiggle(0.28), True, True, 0)
+        if extra:
+            row.pack_start(extra, False, False, 0)
+        return row
+
+    def sidebar(self):
+        side = css_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4), "side-panel")
+        side.set_size_request(232, -1)
+        side.set_hexpand(False)     # (the wavy lines inside want to stretch; the sidebar doesn't)
+
+        brand = css_class(Gtk.Box(spacing=12, margin_bottom=14), "brand")
         self.avatar = Gtk.DrawingArea()
-        self.avatar.set_size_request(56, 56)
+        self.avatar.set_size_request(44, 44)
         self.avatar.connect("draw", self.draw_avatar)
         names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
         self.brand = label(self.pet.cfg["name"], "brand-title")
         names.pack_start(self.brand, False, False, 0)
-        names.pack_start(label("PET SETTINGS", "brand-sub"), False, False, 0)
+        names.pack_start(label("settings", "brand-sub"), False, False, 0)
         brand.pack_start(self.avatar, False, False, 0)
         brand.pack_start(names, False, False, 0)
         side.pack_start(brand, False, False, 0)
 
-        self.search = Gtk.SearchEntry(placeholder_text="Search settings")
+        self.search = Gtk.SearchEntry(placeholder_text="Search")
         css_class(self.search, "search")
         self.search.connect("search-changed", self.on_search)
         self.search.connect("activate", self.on_search_enter)
@@ -137,26 +181,39 @@ class Settings(Gtk.Window):
 
         self.nav = {}
         group = None
-        for key, title, icon, _sub in PAGES:
-            b = Gtk.RadioButton(group=group)
-            group = group or b
-            b.set_mode(False)
-            css_class(b, "nav")
-            row = Gtk.Box(spacing=12)
-            row.pack_start(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.LARGE_TOOLBAR), False, False, 0)
-            row.pack_start(label(title, "nav-label"), False, False, 0)
-            b.add(row)
-            b.snd = "whoosh"
-            b.connect("toggled", self.on_nav, key)
-            side.pack_start(b, False, False, 0)
-            self.nav[key] = b
+        pages = {p[0]: p for p in PAGES}
+        for heading, keys in NAV_GROUPS:
+            side.pack_start(self.section(heading), False, False, 0)
+            for key in keys:
+                _k, title, icon, _sub = pages[key]
+                b = Gtk.RadioButton(group=group)
+                group = group or b
+                b.set_mode(False)
+                css_class(b, "nav")
+                row = Gtk.Box(spacing=12)
+                dot = css_class(Gtk.Box(), "nav-icon")
+                img = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.MENU)
+                img.set_halign(Gtk.Align.CENTER)
+                img.set_valign(Gtk.Align.CENTER)
+                dot.pack_start(img, True, True, 0)
+                row.pack_start(dot, False, False, 0)
+                row.pack_start(label(title, "nav-label"), False, False, 0)
+                b.add(row)
+                b.snd = "whoosh"
+                b.connect("toggled", self.on_nav, key)
+                side.pack_start(b, False, False, 0)
+                self.nav[key] = b
 
         side.pack_start(Gtk.Box(), True, True, 0)  # spacer
 
-        foot = css_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10), "side-card")
-        row = Gtk.Box(spacing=10)
-        row.pack_start(Gtk.Image.new_from_icon_name("audio-volume-high-symbolic", Gtk.IconSize.BUTTON), False, False, 0)
-        row.pack_start(label("Sounds", "side-label"), True, True, 0)
+        foot = css_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), "side-card")
+        row = Gtk.Box(spacing=12)
+        dot = css_class(Gtk.Box(), "nav-icon")
+        img = Gtk.Image.new_from_icon_name("audio-volume-high-symbolic", Gtk.IconSize.MENU)
+        img.set_halign(Gtk.Align.CENTER)
+        dot.pack_start(img, True, True, 0)
+        row.pack_start(dot, False, False, 0)
+        row.pack_start(label("Sounds", "nav-label"), True, True, 0)
         snd = Gtk.Switch(active=self.cfg["sounds"], valign=Gtk.Align.CENTER)
         snd.connect("notify::active", self.on_sounds)
         row.pack_start(snd, False, False, 0)
@@ -167,13 +224,29 @@ class Settings(Gtk.Window):
         vol.connect("value-changed", self.on_volume)
         foot.pack_start(vol, False, False, 0)
         side.pack_start(foot, False, False, 0)
-
-        self.saved = label("✓  Saved", "saved", xalign=0.5)
-        side.pack_start(self.saved, False, False, 6)
         return side
 
     def main_area(self):
-        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin=26)
+        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+
+        head = Gtk.Box(spacing=12)
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.page_title = label("", "page-title")
+        sub = Gtk.Box(spacing=10)
+        self.page_icon = Gtk.Image()
+        dot = css_class(Gtk.Box(valign=Gtk.Align.CENTER), "sub-icon")
+        self.page_icon.set_halign(Gtk.Align.CENTER)
+        dot.pack_start(self.page_icon, True, True, 0)
+        self.page_sub = label("", "page-sub")
+        sub.pack_start(dot, False, False, 0)
+        sub.pack_start(self.page_sub, False, False, 0)
+        titles.pack_start(self.page_title, False, False, 0)
+        titles.pack_start(sub, False, False, 0)
+        head.pack_start(titles, True, True, 0)
+        self.saved = label("✓  Saved", "saved")
+        self.saved.set_valign(Gtk.Align.START)
+        head.pack_end(self.saved, False, False, 0)
+        main.pack_start(head, False, False, 0)
 
         self.preview = css_class(Gtk.DrawingArea(), "hero")
         self.preview.connect("draw", self.draw_preview)
@@ -181,14 +254,7 @@ class Settings(Gtk.Window):
         main.pack_start(self.preview, False, False, 0)
         self.fit_preview()
 
-        head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self.page_title = label("", "page-title")
-        self.page_sub = label("", "page-sub")
-        head.pack_start(self.page_title, False, False, 0)
-        head.pack_start(self.page_sub, False, False, 0)
-        main.pack_start(head, False, False, 0)
-
-        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_UP_DOWN, transition_duration=220)
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=180)
         self.pages = {}
         for key, build in (("pet", self.pet_page), ("box", self.box_page), ("anim", self.anim_page),
                            ("acc", self.acc_page), ("fun", self.fun_page), ("theme", self.theme_page)):
@@ -205,15 +271,16 @@ class Settings(Gtk.Window):
     def card(self, title, sub=None, extra=None):
         box = css_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14), "card")
         self.search_index.append({"page": self.building, "card": box, "title": title, "text": None})
-        head = Gtk.Box(spacing=10)
-        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        titles.pack_start(label(title, "card-title"), False, False, 0)
-        if sub:
-            titles.pack_start(label(sub, "card-sub", wrap=True), False, False, 0)
-        head.pack_start(titles, True, True, 0)
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        head = Gtk.Box(spacing=14)
+        head.pack_start(label(title, "card-title"), False, False, 0)
+        head.pack_start(self.squiggle(), True, True, 0)
         if extra:
             head.pack_start(extra, False, False, 0)
-        box.pack_start(head, False, False, 0)
+        titles.pack_start(head, False, False, 0)
+        if sub:
+            titles.pack_start(label(sub, "card-sub", wrap=True), False, False, 0)
+        box.pack_start(titles, False, False, 0)
         return box
 
     def setting_row(self, title, widget, sub=None):
@@ -778,6 +845,47 @@ class Settings(Gtk.Window):
         c.pack_start(row, False, False, 0)
         page.pack_start(c, False, False, 0)
 
+        c = self.card("Vehicles", "Now and then your pet hops on something and goes for a ride instead of "
+                                  "walking. Picking it up ends the ride")
+        self.ride_switch = Gtk.Switch(active=self.cfg["ride"]["enabled"], halign=Gtk.Align.END,
+                                      valign=Gtk.Align.CENTER)
+        self.ride_switch.connect("notify::active", self.on_ride_switch)
+        c.pack_start(self.setting_row("Goes for rides", self.ride_switch), False, False, 0)
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                           min_children_per_line=2, max_children_per_line=5, column_spacing=10, row_spacing=10)
+        group, self.ride_buttons, self.ride_tiles, self.ride_hover = None, {}, {}, None
+        for key, title in (*vehicles.KINDS.items(), ("random", "Surprise me")):
+            b = Gtk.RadioButton(group=group)
+            group = group or b
+            b.set_mode(False)
+            css_class(b, "tile")
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            pic = Gtk.DrawingArea()
+            pic.set_size_request(118, 70)
+            pic.connect("draw", self.draw_ride_tile, key)
+            self.ride_tiles[key] = pic
+            inner.pack_start(pic, False, False, 0)
+            inner.pack_start(label(title, "tile-label", xalign=0.5), False, False, 0)
+            b.add(inner)
+            b.snd = "select"
+            b.connect("enter-notify-event", self.on_ride_hover, key)
+            b.connect("leave-notify-event", self.on_ride_hover, None)
+            flow.add(b)
+            self.ride_buttons[key] = b
+        self.ride_buttons[self.cfg["ride"]["vehicle"]].set_active(True)
+        for key, b in self.ride_buttons.items():
+            b.connect("toggled", lambda btn, k=key: btn.get_active() and self.on_ride_vehicle(k))
+        c.pack_start(flow, False, False, 0)
+        self.ride_every = self.slider(config.RIDE_MIN, config.RIDE_MAX, 1, 0, self.cfg["ride"]["every"], " min",
+                                      self.on_ride_every)
+        c.pack_start(self.setting_row("How often", self.ride_every, "Minutes between rides, roughly"),
+                     False, False, 0)
+        go = icon_button("Ride now", "media-playback-start-symbolic", "Hop on now")
+        go.set_halign(Gtk.Align.START)
+        go.connect("clicked", lambda _b: self.pet.ride_now())
+        c.pack_start(go, False, False, 0)
+        page.pack_start(c, False, False, 0)
+
         c = self.card("Reactions", "Your pet cheers when something finishes downloading")
         self.react_switches = {}
         for key, text, sub in (
@@ -908,7 +1016,7 @@ class Settings(Gtk.Window):
         """A tiny settings window in the theme's colours."""
         w, h = area.get_allocated_width(), area.get_allocated_height()
         c = self.pet.theme_preview(key)
-        rounded(cr, 0, 0, w, h, 10)
+        rounded(cr, 0, 0, w, h, 14)
         cr.set_source_rgb(*c["bg0"])
         cr.fill_preserve()
         cr.set_source_rgba(*c["accent"], 0.35)
@@ -1175,104 +1283,123 @@ class Settings(Gtk.Window):
         self.style()
         self.refresh()
         self.preview.queue_draw()
+        self.show_page(self.stack.get_visible_child_name())
+        for sq in self.squiggles:
+            sq.queue_draw()
         for t in getattr(self, "theme_tiles", []):
             t.queue_draw()
 
     def style(self):
         c = self.pet.colors
+        light = themes.is_light(c)
+        mix = lambda x, y, t: hexc(scene.mix(c[x] if isinstance(x, str) else x, c[y] if isinstance(y, str) else y, t))
         bg0, bg1, fg = hexc(c["bg0"]), hexc(c["bg1"]), hexc(c["fg"])
         acc, acc2 = hexc(c["accent"]), hexc(c["accent2"])
-        knob = "#ffffff" if themes.is_light(c) else fg   # light themes: white knobs, not dark ones
+        r, g, b = c["accent2"]
+        on_acc = "#15121c" if 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5 else "#ffffff"   # text on the accent
+        base = mix("bg0", (0, 0, 0), 0.0 if light else 0.18)          # behind the panels
+        panel = mix("bg0", "bg1", 0.45)                               # sidebar + main panel
+        card = bg1                                                    # cards
+        raised = mix("bg1", "fg", 0.06)                               # tiles, fields, tracks
+        tonal = mix("bg1", "accent2", 0.16)                           # selected / tonal buttons
+        tonal_hi = mix("bg1", "accent2", 0.26)
+        muted = mix("fg", "bg1", 0.42)
+        font = fonts.FAMILY
         css = f"""
-        window.larry {{ background-color: {bg0}; color: {fg};
-            background-image: radial-gradient(circle at 85% 0%, alpha({acc2}, 0.10), transparent 55%); }}
+        window.larry, window.larry * {{ font-family: "{font}", sans-serif; }}
+        window.larry {{ background-color: {base}; color: {fg}; }}
         window.larry label {{ color: {fg}; }}
-        .sidebar {{ background-image: linear-gradient(to bottom, {bg1}, shade({bg0}, 0.85));
-                    border-right: 1px solid alpha({acc}, 0.10); padding: 26px 16px 18px 16px; }}
-        .brand-title {{ font-size: 22px; font-weight: 800; }}
-        .brand-sub {{ font-size: 10px; font-weight: 700; letter-spacing: 2px; opacity: 0.55; }}
-        window.larry .nav {{ background: transparent; border: 1px solid transparent; border-radius: 12px;
-                padding: 11px 14px; box-shadow: none; transition: all 220ms ease; }}
-        window.larry .nav:hover {{ background: alpha({acc}, 0.08); box-shadow: none; }}
-        window.larry .nav:checked {{ background-image: linear-gradient(to right, alpha({acc2}, 0.50), alpha({acc2}, 0.12));
-                        border-color: alpha({acc2}, 0.45); box-shadow: 0 6px 18px alpha({acc2}, 0.22); }}
-        .nav image {{ color: alpha({fg}, 0.75); }}
-        .nav:checked image {{ color: {fg}; }}
+        .side-panel, .main-panel {{ background-color: {panel}; border-radius: 26px; }}
+        .side-panel {{ padding: 18px 14px 14px 14px; }}
+        .main-panel {{ padding: 24px 26px 0 26px; }}
+
+        .brand-title {{ font-size: 20px; font-weight: 900; }}
+        .brand-sub {{ font-size: 12px; font-weight: 600; color: {muted}; }}
+        .section {{ margin: 14px 6px 4px 8px; }}
+        .section-label {{ font-size: 12px; font-weight: 800; color: {muted}; }}
+
+        window.larry .nav {{ background: transparent; border: none; border-radius: 999px;
+                padding: 5px 14px 5px 5px; box-shadow: none; transition: background 180ms ease; }}
+        window.larry .nav:hover {{ background: alpha({fg}, 0.06); box-shadow: none; }}
+        window.larry .nav:checked {{ background: {tonal_hi}; box-shadow: none; }}
+        .nav-icon {{ min-width: 32px; min-height: 32px; border-radius: 999px; }}
+        .nav-icon image {{ color: {muted}; }}
+        .nav:checked .nav-icon {{ background: {acc2}; }}
+        .nav:checked .nav-icon image {{ color: {on_acc}; }}
         .nav-label {{ font-weight: 700; font-size: 14px; }}
-        .side-card {{ background: alpha({bg1}, 0.8); border: 1px solid alpha({acc}, 0.10);
-                      border-radius: 14px; padding: 14px; }}
-        .side-label {{ font-weight: 600; }}
-        .saved {{ opacity: 0; color: {acc2}; font-weight: 700; transition: opacity 500ms ease; }}
+        .side-card {{ background: {card}; border-radius: 20px; padding: 8px 12px 6px 6px; }}
+        .saved {{ opacity: 0; background: {tonal}; color: {acc2}; font-weight: 800; font-size: 12px;
+                  border-radius: 999px; padding: 6px 12px; transition: opacity 500ms ease; }}
         .saved.show {{ opacity: 1; transition: opacity 120ms ease; }}
 
-        window.larry entry.search {{ margin-bottom: 12px; border-radius: 12px; padding: 7px 10px; }}
-        window.larry .results {{ background: transparent; }}
-        window.larry .results row {{ border-radius: 10px; }}
-        window.larry .results row:hover {{ background: alpha({acc2}, 0.18); }}
-        .card.found {{ border-color: {acc2}; box-shadow: 0 0 0 2px alpha({acc2}, 0.8), 0 0 24px alpha({acc2}, 0.45); }}
-        .page-title {{ font-size: 28px; font-weight: 800; }}
-        .page-sub {{ opacity: 0.6; }}
-        .card {{ background-image: linear-gradient(to bottom, alpha({bg1}, 0.92), alpha({bg1}, 0.70));
-                 border: 1px solid alpha({acc}, 0.10); border-radius: 18px; padding: 20px;
-                 box-shadow: 0 10px 26px alpha(black, 0.28); }}
-        .card-title {{ font-weight: 800; font-size: 15px; }}
-        .card-sub, .row-sub {{ opacity: 0.55; font-size: 12px; }}
-        .row-title {{ font-weight: 600; }}
-        .modified {{ color: {acc2}; font-size: 12px; font-weight: 600; }}
+        window.larry entry.search {{ background: {card}; border: none; border-radius: 999px; padding: 8px 14px;
+                  box-shadow: none; }}
+        window.larry entry.search:focus {{ box-shadow: inset 0 0 0 2px alpha({acc2}, 0.7); }}
+        window.larry .results {{ background: transparent; margin-top: 6px; }}
+        window.larry .results row {{ border-radius: 14px; }}
+        window.larry .results row:hover {{ background: {tonal}; }}
 
-        window.larry button {{ background-image: linear-gradient(to bottom, alpha({fg}, 0.07), alpha({fg}, 0.02));
-            background-color: {bg1}; color: {fg}; border: 1px solid alpha({acc}, 0.22); border-radius: 11px;
-            padding: 7px 14px; box-shadow: none; text-shadow: none; -gtk-icon-shadow: none;
-            transition: all 160ms ease; }}
-        window.larry button:hover {{ border-color: alpha({acc2}, 0.8);
-            box-shadow: 0 0 0 3px alpha({acc2}, 0.15), 0 6px 16px alpha({acc2}, 0.18); }}
-        window.larry button:active {{ background-color: alpha({acc2}, 0.30); }}
+        .page-title {{ font-size: 34px; font-weight: 900; }}
+        .page-sub {{ color: {muted}; font-size: 14px; font-weight: 600; }}
+        .sub-icon {{ min-width: 26px; min-height: 26px; border-radius: 999px; background: {tonal}; }}
+        .sub-icon image {{ color: {acc2}; }}
+        .card {{ background-color: {card}; border-radius: 24px; padding: 20px 22px; margin-bottom: 2px; }}
+        .card.found {{ box-shadow: inset 0 0 0 2px {acc2}; background-color: {tonal}; }}
+        .card-title {{ font-weight: 900; font-size: 18px; }}
+        .card-sub, .row-sub {{ color: {muted}; font-size: 12.5px; font-weight: 600; }}
+        .row-title {{ font-weight: 700; font-size: 14px; }}
+        .modified {{ color: {acc2}; font-size: 12px; font-weight: 800; }}
+
+        window.larry button {{ background: {tonal}; background-image: none; color: {fg}; border: none;
+            border-radius: 999px; padding: 8px 16px; box-shadow: none; text-shadow: none; -gtk-icon-shadow: none;
+            font-weight: 700; transition: background 150ms ease; }}
+        window.larry button:hover {{ background: {tonal_hi}; box-shadow: none; }}
+        window.larry button:active {{ background: alpha({acc2}, 0.45); }}
         window.larry button:disabled {{ opacity: 0.35; }}
-        window.larry button image {{ color: {fg}; }}
-        window.larry .chip {{ border-radius: 999px; padding: 8px 12px; }}
-        window.larry .chip:checked, window.larry .segmented button:checked {{
-            background-image: linear-gradient(to bottom, alpha({acc2}, 0.75), alpha({acc2}, 0.45));
-            border-color: {acc2}; box-shadow: 0 4px 14px alpha({acc2}, 0.30); }}
-        window.larry .segmented button {{ border-radius: 0; margin: 0; }}
-        window.larry .segmented button:first-child {{ border-radius: 11px 0 0 11px; }}
-        window.larry .segmented button:last-child {{ border-radius: 0 11px 11px 0; }}
-        window.larry .tile {{ padding: 8px; border-radius: 14px; }}
-        window.larry .tile:checked {{ background-color: alpha({acc2}, 0.18); border-color: {acc2};
-            box-shadow: 0 0 0 2px alpha({acc2}, 0.7), 0 8px 20px alpha({acc2}, 0.30); }}
-        .tile-label {{ font-size: 12px; font-weight: 600; }}
+        window.larry button image {{ color: {acc2}; }}
+        window.larry .chip {{ border-radius: 999px; padding: 8px 14px; }}
+        window.larry .chip:checked, window.larry .segmented button:checked {{ background: {acc2}; color: {on_acc}; }}
+        window.larry .chip:checked label, window.larry .segmented button:checked label,
+        window.larry .chip:checked image, window.larry .segmented button:checked image {{ color: {on_acc}; }}
+        window.larry .segmented button {{ border-radius: 6px; margin: 0 1px; }}
+        window.larry .segmented button:first-child {{ border-radius: 999px 6px 6px 999px; }}
+        window.larry .segmented button:last-child {{ border-radius: 6px 999px 999px 6px; }}
+        window.larry .tile {{ background: {raised}; padding: 8px; border-radius: 20px; }}
+        window.larry .tile:hover {{ background: {tonal}; }}
+        window.larry .tile:checked {{ background: {tonal_hi}; box-shadow: inset 0 0 0 2px {acc2}; }}
+        .tile-label {{ font-size: 12.5px; font-weight: 700; }}
         window.larry .tile-x {{ padding: 2px; margin: 4px; min-width: 20px; min-height: 20px; border-radius: 999px;
             background: alpha({bg0}, 0.85); opacity: 0.75; }}
-        window.larry .tile-x:hover {{ opacity: 1; background: alpha(#e0455a, 0.85); border-color: #e0455a;
-            box-shadow: 0 0 0 3px alpha(#e0455a, 0.2); }}
-        .acc-name {{ font-weight: 800; font-size: 15px; }}
+        window.larry .tile-x:hover {{ opacity: 1; background: #e0455a; }}
+        .acc-name {{ font-weight: 900; font-size: 16px; }}
 
-        window.larry combobox button {{ padding: 6px 12px; }}
-        menu, .menu {{ background: {bg1}; color: {fg}; border: 1px solid alpha({acc}, 0.2); border-radius: 10px; }}
-        menuitem {{ padding: 6px 12px; }}
-        menuitem:hover {{ background: alpha({acc2}, 0.35); }}
-        window.larry entry {{ background: {bg1}; color: {fg}; border: 1px solid alpha({acc}, 0.3);
-                              border-radius: 10px; padding: 6px 10px; box-shadow: none; }}
+        window.larry combobox button {{ padding: 7px 14px; }}
+        menu, .menu {{ background: {card}; color: {fg}; border: none; border-radius: 16px; padding: 6px; }}
+        menuitem {{ padding: 7px 12px; border-radius: 10px; }}
+        menuitem:hover {{ background: {tonal_hi}; }}
+        window.larry entry {{ background: {raised}; color: {fg}; border: none; border-radius: 14px;
+                              padding: 8px 12px; box-shadow: none; }}
+        window.larry entry:focus {{ box-shadow: inset 0 0 0 2px alpha({acc2}, 0.7); }}
 
-        window.larry switch {{ background: alpha({fg}, 0.10); border: 1px solid alpha({acc}, 0.25);
-                  border-radius: 999px; transition: all 200ms ease; min-width: 46px; }}
-        window.larry switch:checked {{ background-image: linear-gradient(to right, alpha({acc2}, 0.7), {acc2});
-                  border-color: {acc2}; box-shadow: 0 0 12px alpha({acc2}, 0.4); }}
-        window.larry switch slider {{ background: {knob}; border: none; border-radius: 999px;
-                  box-shadow: 0 2px 6px alpha(black, 0.35); }}
+        window.larry switch {{ background: {raised}; border: 2px solid alpha({fg}, 0.28); border-radius: 999px;
+                  min-width: 48px; min-height: 26px; transition: all 180ms ease; }}
+        window.larry switch:checked {{ background: {acc2}; border-color: {acc2}; }}
+        window.larry switch slider {{ background: alpha({fg}, 0.55); border: 6px solid transparent;
+                  background-clip: content-box; border-radius: 999px; box-shadow: none; min-width: 18px;
+                  min-height: 18px; }}
+        window.larry switch:checked slider {{ background: {on_acc}; border-width: 2px; }}
 
-        window.larry scale {{ padding: 10px 6px; }}
-        window.larry scale trough {{ background: alpha({fg}, 0.10); border: none; border-radius: 999px; min-height: 6px; }}
-        window.larry scale highlight {{ background-image: linear-gradient(to right, alpha({acc2}, 0.55), {acc2});
-                  border: none; border-radius: 999px; }}
-        window.larry scale slider {{ background: {knob}; border: none; border-radius: 999px; min-width: 18px;
-                  min-height: 18px; margin: -7px; box-shadow: 0 0 0 4px alpha({acc2}, 0.25), 0 2px 6px alpha(black, 0.4);
-                  transition: box-shadow 160ms ease; }}
-        window.larry scale slider:hover, window.larry scale slider:active {{
-                  box-shadow: 0 0 0 7px alpha({acc2}, 0.30), 0 2px 8px alpha(black, 0.4); }}
-        window.larry scale value {{ color: alpha({fg}, 0.7); min-width: 64px; }}
+        window.larry scale {{ padding: 12px 8px; }}
+        window.larry scale trough {{ background: {raised}; border: none; border-radius: 999px; min-height: 10px; }}
+        window.larry scale highlight {{ background: {acc2}; border: none; border-radius: 999px; }}
+        window.larry scale slider {{ background: {acc2}; border: 3px solid {card}; border-radius: 999px;
+                  min-width: 6px; min-height: 26px; margin: -10px -3px; box-shadow: none; }}
+        window.larry scale slider:hover, window.larry scale slider:active {{ background: {fg}; }}
+        window.larry scale value {{ color: {muted}; font-weight: 700; min-width: 64px; }}
 
         window.larry scrollbar slider {{ background: alpha({fg}, 0.18); border-radius: 999px; min-width: 6px; border: none; }}
         window.larry scrollbar {{ background: transparent; border: none; }}
+        window.larry scrolledwindow undershoot.top, window.larry scrolledwindow undershoot.bottom {{ background: none; }}
         """
         if getattr(self, "css", None) is None:
             self.css = Gtk.CssProvider()
@@ -1432,9 +1559,10 @@ class Settings(Gtk.Window):
             self.show_page(key)
 
     def show_page(self, key):
-        _k, title, _icon, sub = next(p for p in PAGES if p[0] == key)
+        _k, title, icon, sub = next(p for p in PAGES if p[0] == key)
         self.stack.set_visible_child_name(key)
-        self.page_title.set_text(title)
+        self.page_title.set_markup(f'{GLib.markup_escape_text(title)}<span foreground="{hexc(self.pet.colors["accent2"])}"> •</span>')
+        self.page_icon.set_from_icon_name(icon, Gtk.IconSize.MENU)
         self.page_sub.set_text(sub)
 
     # ── changes ─────────────────────────────────────────────────────────────
@@ -1459,6 +1587,9 @@ class Settings(Gtk.Window):
             sw.set_active(cfg["reactions"][key])
         self.game_switch.set_active(cfg["game"])
         self.chat_switch.set_active(cfg["chat"]["typing"])
+        self.ride_switch.set_active(cfg["ride"]["enabled"])
+        self.ride_buttons[cfg["ride"]["vehicle"]].set_active(True)
+        self.ride_every.set_value(cfg["ride"]["every"])
         self.chat_every.set_value(cfg["chat"]["every"])
         self.theme_buttons[cfg["theme"]].set_active(True)
         self.match_switch.set_active(cfg["box"]["match_theme"])
@@ -1605,6 +1736,67 @@ class Settings(Gtk.Window):
         if not self.syncing and self.cfg["behavior"][key] != sw.get_active():
             self.cfg["behavior"][key] = sw.get_active()
             self.apply()
+
+    def on_ride_switch(self, sw, _p):
+        if not self.syncing and self.cfg["ride"]["enabled"] != sw.get_active():
+            self.cfg["ride"]["enabled"] = sw.get_active()
+            self.apply()
+
+    def on_ride_vehicle(self, key):
+        if self.syncing or self.cfg["ride"]["vehicle"] == key:
+            return
+        self.cfg["ride"]["vehicle"] = key
+        self.apply()
+
+    def on_ride_every(self, scale):
+        if self.syncing:
+            return
+        self.cfg["ride"]["every"] = int(scale.get_value())
+        self.scene_apply_soon()
+
+    def on_ride_hover(self, _b, _ev, key):
+        """The tile under the mouse drives along on the spot."""
+        self.ride_hover = key
+        if key and not getattr(self, "ride_timer", None):
+            self.ride_timer = GLib.timeout_add(33, self.tick_ride_tile)
+
+    def tick_ride_tile(self):
+        for pic in self.ride_tiles.values():
+            pic.queue_draw()
+        if not self.ride_hover:
+            self.ride_timer = None
+            return False
+        return True
+
+    def draw_ride_tile(self, area, cr, key):
+        w, h = area.get_allocated_width(), area.get_allocated_height()
+        c = self.pet.colors
+        cr.set_source_rgba(*c["fg"], 0.12)                     # a road
+        rounded(cr, 10, h - 9, w - 20, 3, 1.5)
+        cr.fill()
+        if key not in vehicles.KINDS:
+            cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            cr.set_font_size(h * 0.55)
+            ext = cr.text_extents("?")
+            cr.move_to(w / 2 - ext.x_advance / 2, h / 2 + ext.height / 2 - 4)
+            cr.set_source_rgba(*c["accent2"], 0.9)
+            cr.show_text("?")
+            return
+        x0, x1, _top = vehicles.EXTENT[key]
+        pet = self.pet
+        top = pet.ride_top(key)
+        L = min((h - 14) / top, (w - 12) / (x1 - x0))
+        live = self.ride_hover == key
+        t = time.monotonic() if live else 0.4
+        dist = t * 90 if live else 30
+        crank = vehicles.crank(key, dist, L)
+        frame = int(crank / (2 * math.pi) * 8) % 8 if key == "bike" else 0
+
+        cr.save()
+        cr.translate(w / 2 - (x0 + x1) / 2 * L, h - 8)
+        vehicles.draw(cr, key, L, lambda: pet.draw_rider(cr, key, L, 1, frame), t, dist, live,
+                      head=pet.rider_head(key), pedal=pet.pedal_length(), halo=self.cfg["outline"])
+        cr.restore()
 
     def on_reset_best(self, _b):
         self.pet.reset_best()
@@ -1856,39 +2048,29 @@ class Settings(Gtk.Window):
         w, h = area.get_allocated_width(), area.get_allocated_height()
         c, pet = self.pet.colors, self.pet
 
-        # backdrop: a soft "desktop" with a dotted grid and a glow under the box
-        rounded(cr, 0, 0, w, h, 18)
+        # backdrop: a card with a faint dotted grid, like a little desktop
+        rounded(cr, 0, 0, w, h, 24)
         cr.clip()
-        g = cairo.LinearGradient(0, 0, 0, h)
-        g.add_color_stop_rgb(0, *c["bg1"])
-        g.add_color_stop_rgb(1, *scene.mix(c["bg0"], (0, 0, 0), 0.25))
-        cr.set_source(g)
+        cr.set_source_rgb(*c["bg1"])
         cr.paint()
-        cr.set_source_rgba(*c["fg"], 0.06)
-        for x in range(12, w, 22):
-            for y in range(12, h, 22):
-                cr.rectangle(x, y, 1.5, 1.5)
-        cr.fill()
-        glow = cairo.RadialGradient(w / 2, h * 0.45, 10, w / 2, h * 0.45, w * 0.45)
-        glow.add_color_stop_rgba(0, *c["accent2"], 0.22)
-        glow.add_color_stop_rgba(1, *c["accent2"], 0)
-        cr.set_source(glow)
-        cr.paint()
-        cr.set_source_rgba(*c["fg"], 0.12)   # the "screen edge" the box hangs from
-        cr.rectangle(0, 0, w, 3)
-        cr.fill()
-        # live badge
-        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-        cr.set_font_size(10)
-        rounded(cr, 12, h - 28, 92, 18, 9)
-        cr.set_source_rgba(*c["bg0"], 0.6)
+        cr.set_source_rgba(*c["fg"], 0.07)
+        for x in range(14, w, 20):
+            for y in range(14, h, 20):
+                cr.arc(x, y, 1, 0, 2 * math.pi)
+                cr.fill()
+        # live badge: a little pill in the corner
+        cr.select_font_face(fonts.FAMILY, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(11)
+        text = "LIVE PREVIEW"
+        tw = cr.text_extents(text).x_advance
+        rounded(cr, 14, h - 34, tw + 34, 22, 11)
+        cr.set_source_rgb(*scene.mix(c["bg1"], c["accent2"], 0.18))
         cr.fill()
         cr.set_source_rgb(*c["accent2"])
-        cr.arc(23, h - 19, 3, 0, 2 * math.pi)
+        cr.arc(27, h - 23, 3.5, 0, 2 * math.pi)
         cr.fill()
-        cr.set_source_rgba(*c["fg"], 0.8)
-        cr.move_to(32, h - 15.5)
-        cr.show_text("LIVE PREVIEW")
+        cr.move_to(37, h - 19)
+        cr.show_text(text)
 
         bw, bh = pet.box_w, pet.box_h
         bx = (w / ZOOM - bw) / 2
@@ -1916,11 +2098,8 @@ class Settings(Gtk.Window):
     def draw_avatar(self, area, cr):
         w, h = area.get_allocated_width(), area.get_allocated_height()
         c = self.pet.colors
-        rounded(cr, 0, 0, w, h, 16)
-        g = cairo.LinearGradient(0, 0, w, h)
-        g.add_color_stop_rgba(0, *c["accent2"], 0.55)
-        g.add_color_stop_rgba(1, *c["accent"], 0.25)
-        cr.set_source(g)
+        cr.arc(w / 2, h / 2, min(w, h) / 2, 0, 2 * math.pi)
+        cr.set_source_rgb(*scene.mix(c["bg1"], c["accent2"], 0.3))
         cr.fill()
         sprite = self.pet_sprites()[0]
         sw, sh = sprites.logical_size(sprite)
@@ -1952,7 +2131,7 @@ class Settings(Gtk.Window):
     def draw_edge_tile(self, cr, w, h, edge):
         """A mini screen with the tab (and its box, peeking out) on this edge."""
         c = self.pet.colors
-        rounded(cr, 0, 0, w, h, 10)
+        rounded(cr, 0, 0, w, h, 14)
         cr.clip()
         cr.set_source_rgba(*c["fg"], 0.05)
         cr.paint()
@@ -1980,7 +2159,7 @@ class Settings(Gtk.Window):
 
     def draw_acc_tile(self, cr, w, h, acc_id):
         c = self.pet.colors
-        rounded(cr, 0, 0, w, h, 10)
+        rounded(cr, 0, 0, w, h, 14)
         cr.clip()
         cr.set_source_rgba(*c["fg"], 0.05)
         cr.paint()
@@ -1992,7 +2171,7 @@ class Settings(Gtk.Window):
 
     def draw_deco_tile(self, cr, w, h, kind):
         c = self.pet.colors
-        rounded(cr, 0, 0, w, h, 10)
+        rounded(cr, 0, 0, w, h, 14)
         cr.clip()
         cr.set_source_rgba(*c["fg"], 0.05)
         cr.paint()
@@ -2024,7 +2203,7 @@ class Settings(Gtk.Window):
         if colors:
             b.update(colors=colors, ground="grass", ground_height=12,
                      items=[at("tree", 0.2), at("flowers", 0.55), at("mushrooms", 0.8), at("sun", 0.85, 32)])
-        rounded(cr, 0, 0, w, h, 10)
+        rounded(cr, 0, 0, w, h, 14)
         cr.clip()
         cr.set_source_rgba(*self.pet.colors["fg"], 0.05)
         cr.paint()

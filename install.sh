@@ -14,7 +14,7 @@
 #   install.sh --uninstall   remove it again (keeps your settings in ~/.config/larry)
 set -u
 
-VERSION="v1.1.0"
+VERSION="v1.2.0"
 REPO="BugzySleeps/hyprland-pets"
 DEST="${XDG_DATA_HOME:-$HOME/.local/share}/hyprland-pets"
 BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"

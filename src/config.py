@@ -10,6 +10,7 @@ import library
 import scene
 import themes
 import tomlw
+import vehicles
 
 HERE = Path(__file__).resolve().parent
 DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "larry"
@@ -48,6 +49,11 @@ DEFAULTS = {
         "typing": False,               # napping in a terminal while you're away, it types silly messages there
         "every": 4,                    # minutes between messages (while you stay away)
     },
+    "ride": {
+        "enabled": True,               # now and then it hops on a vehicle instead of walking
+        "vehicle": "motorcycle",       # motorcycle | car | helicopter | bike | random
+        "every": 3,                    # minutes between rides, roughly
+    },
     "game": True,                      # catch game: throw the pet up, catch it on the way down
     "pet_sounds": False,               # moo/"weee!" when thrown, a blip when caught (off: could get annoying)
     "sounds": True,                    # clicks and ticks in the settings window
@@ -71,6 +77,7 @@ DEFAULTS = {
 SIZE_MIN, SIZE_MAX = 24, 96
 SLEEP_MIN, SLEEP_MAX = 10, 600
 CHAT_MIN, CHAT_MAX = 1, 30
+RIDE_MIN, RIDE_MAX = 1, 30
 
 COMMENTS = {
     "name": "your pet's name",
@@ -92,6 +99,9 @@ COMMENTS = {
     "typing": "napping in a terminal while you're away, it wakes up now and then and types something silly "
               "(on screen only: never typed into your shell)",
     "every": f"minutes between messages while you're away ({CHAT_MIN}-{CHAT_MAX})",
+    "ride.enabled": "now and then the pet hops on a vehicle instead of walking",
+    "ride.vehicle": "which one: " + " | ".join(vehicles.KINDS) + " | random",
+    "ride.every": f"minutes between rides, roughly ({RIDE_MIN}-{RIDE_MAX})",
     "game": "catch game: throw the pet up and catch it on the way down (+1, in a row); best in the box",
     "pet_sounds": "the pet's own sounds: a moo (Larry) or weee when thrown, a blip when caught (off by default)",
     "packages": "react when apt, pacman, an AUR helper, emerge, dnf, zypper, flatpak... finishes",
@@ -172,6 +182,15 @@ def load():
     v = uchat.get("every")
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         cfg["chat"]["every"] = max(CHAT_MIN, min(CHAT_MAX, round(v)))
+
+    uride = user.get("ride") if isinstance(user.get("ride"), dict) else {}
+    if isinstance(uride.get("enabled"), bool):
+        cfg["ride"]["enabled"] = uride["enabled"]
+    if uride.get("vehicle") in (*vehicles.KINDS, "random"):
+        cfg["ride"]["vehicle"] = uride["vehicle"]
+    v = uride.get("every")
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        cfg["ride"]["every"] = max(RIDE_MIN, min(RIDE_MAX, round(v)))
 
     ureact = user.get("reactions") if isinstance(user.get("reactions"), dict) else {}
     for key in ("packages", "downloads", "bubble"):

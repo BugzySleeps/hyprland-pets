@@ -48,6 +48,11 @@ customisable from a settings window: the box's scene, the pet's accessories, and
   Downloads folder.
   - Telling success from failure needs a readable log: pacman's and apt's are; on Gentoo, add
     yourself to the `portage` group. Without one, it assumes success.
+- **Goes for rides.** Every few minutes the pet hops on a vehicle and drives around for a bit instead of
+  walking: a mini motorcycle (the default, with the odd wheelie), a car, a one-person helicopter that
+  takes off and flies around with the pet hanging under the rotor, or a bike. Larry sits on them
+  properly, front legs on the handlebars, and pedals the bike, still wearing his accessories. Pick one, or "Surprise me", on the Fun page, and set how often.
+  Picking the pet up ends the ride.
 - **Catch game.** Throw your pet up and catch it on the way down for +1. Bounce it off a side of the
   screen (or a window) first for +2, or off two sides (a wall, then the top) for +3: every different side adds a
   point. Catches only count in a row: let it land and the streak is over. Your best is kept and shown in the corner of the box,
@@ -76,6 +81,8 @@ customisable from a settings window: the box's scene, the pet's accessories, and
 | Accessories | Animation |
 |---|---|
 | ![Fitting room](docs/acc.png) | ![Animation curves](docs/anim.png) |
+| **Fun** | **Pet** |
+| ![Vehicles, games and reactions](docs/fun.png) | ![Picking your pet](docs/pet.png) |
 
 ## Requirements
 
@@ -198,10 +205,15 @@ src/sounds.py        synthesized UI sounds
 src/watch.py         notices package managers and downloads finishing
 src/termchat.py      the pet's messages in your terminal
 src/themes.py        colour themes
+src/fonts/           the settings window's font (Nunito, OFL)
+src/vehicles.py      the motorcycle, car, helicopter and bike
 src/config.py        settings file
-tools/make_falling_larry.py  draws Larry's falling and held (waddling) poses
+tools/make_falling_larry.py  draws Larry's falling, held (waddling), typing and riding poses
 ```
 
 ## License
 
 MIT: use it, change it, share it, build on it. Contributions welcome. See [LICENSE](LICENSE).
+
+The settings window uses the [Nunito](https://github.com/googlefonts/nunito) font, bundled in `src/fonts/`
+under the SIL Open Font License (`src/fonts/OFL.txt`). It's loaded for the app only, nothing is installed.

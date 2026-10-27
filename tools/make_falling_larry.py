@@ -5,7 +5,10 @@
   src/larry-held.png      held: the same pose with all four legs waddling, 8 frames side by side
   src/larry-held.json     frame count and size, for sprites.py
   src/larry-typing.png    sitting on his butt with a mini keyboard on his lap, tapping it with his
-                          front legs: 6 frames (+ larry-typing.json)
+                          front legs: 8 frames (+ larry-typing.json)
+  src/larry-riding.png    sitting on a vehicle, side on: front legs reaching forward to the handlebars,
+                          back legs pedalling (8 frames, one turn of the pedals; + larry-riding.json,
+                          which also says where his seat and the pedals' middle are in the frame)
 
 His head is cut from the original drawing; body, arms, legs, hooves and tail are drawn here in
 the same style (thick black outline, white fill). Run it again after changing anything below.
@@ -41,6 +44,15 @@ SIT_LEG_L = [(290, 690), (240, 745), (222, 792), (232, 818)]
 SIT_LEG_R = [(410, 690), (465, 745), (484, 792), (472, 818)]
 KEYBOARD = (196, 700, 504, 800)          # body coordinates: x0, y0, x1, y1
 TYPE_FRAMES = [(0, 0), (1, 0), (0, 0), (0, 1), (0, 0), (1, 0), (0, 1), (0, 0)]   # (left up, right up)
+
+# riding: side on, sitting; the back legs go forward to the pedals, the front legs to the handlebars
+RIDE_SEAT = (350, 722)                   # body coordinates: the bottom of his butt
+RIDE_HIPS = ((330, 680), (380, 685))     # far (white) leg, near (black) leg
+RIDE_CRANK, RIDE_PEDAL = (545, 860), 50  # the pedals' middle and how far out they go
+THIGH, SHIN = 175, 160
+RIDE_ARM_FAR = [(330, 475), (440, 555), (530, 560), (590, 532)]
+RIDE_ARM_NEAR = [(440, 470), (520, 548), (575, 545), (622, 518)]
+RIDE_FRAMES = 8
 
 
 def T(p):
@@ -232,7 +244,70 @@ def render_typing(left_up, right_up):
     return Image.frombuffer("RGBA", (700, 1000), bytes(surf.get_data()), "raw", "BGRa", surf.get_stride(), 1)
 
 
-def save_sheet(frames, name, out, fall_box):
+def bent_leg(hip, foot):
+    """Hip to foot with the knee bent forward and up (two equal-ish segments, like a pedalling leg)."""
+    dx, dy = foot[0] - hip[0], foot[1] - hip[1]
+    d = min(math.hypot(dx, dy), THIGH + SHIN - 1)
+    a = math.atan2(dy, dx)
+    k = math.acos(max(-1, min(1, (THIGH ** 2 + d ** 2 - SHIN ** 2) / (2 * THIGH * d))))
+    knee = (hip[0] + THIGH * math.cos(a - k), hip[1] + THIGH * math.sin(a - k))   # the forward/up side
+    mid = (knee[0] + (foot[0] - knee[0]) * 0.55, knee[1] + (foot[1] - knee[1]) * 0.55)
+    return [hip, knee, mid, foot]
+
+
+def render_riding(angle):
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 800, 1000)
+    cr = cairo.Context(surf)
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    path(cr, [(250, 680), (200, 700), (170, 740), (160, 790)])   # tail hanging off the back
+    cr.set_source_rgb(0, 0, 0)
+    cr.set_line_width(12)
+    cr.stroke()
+    x, y = T((160, 790))
+    for a in (-0.5, 0, 0.5):
+        cr.move_to(x, y)
+        cr.line_to(x + math.sin(a) * 24, y + math.cos(a) * 28)
+        cr.set_line_width(13)
+        cr.stroke()
+    cx, cy = RIDE_CRANK
+    far = (cx - math.cos(angle) * RIDE_PEDAL, cy - math.sin(angle) * RIDE_PEDAL)
+    near = (cx + math.cos(angle) * RIDE_PEDAL, cy + math.sin(angle) * RIDE_PEDAL)
+    limb(cr, bent_leg(RIDE_HIPS[0], far))                          # far side: behind him
+    limb(cr, RIDE_ARM_FAR)
+    path(cr, TORSO)
+    cr.close_path()
+    cr.set_source_rgb(1, 1, 1)
+    cr.fill_preserve()
+    cr.save()
+    cr.clip()
+    cr.set_source_rgb(0, 0, 0)
+    for spot in SPOTS:
+        path(cr, spot)
+        cr.close_path()
+        cr.fill()
+    cr.restore()
+    path(cr, TORSO)
+    cr.close_path()
+    cr.set_source_rgb(0, 0, 0)
+    cr.set_line_width(LW)
+    cr.stroke()
+    limb(cr, bent_leg(RIDE_HIPS[1], near), fill=(0.03, 0.03, 0.03))   # near side: in front
+    limb(cr, RIDE_ARM_NEAR)
+    hs, _keep = head_surface()
+    cr.set_source_surface(hs, *HEAD_AT)
+    cr.paint()
+    surf.flush()
+    return Image.frombuffer("RGBA", (800, 1000), bytes(surf.get_data()), "raw", "BGRa", surf.get_stride(), 1)
+
+
+def standing_box():
+    """Where Larry's standing picture (as the pet sprite crops it) would sit on the canvas: his head
+    is copied from it unscaled at HEAD_AT, so accessories fitted to it can go on these poses too."""
+    x0, y0, x1, y1 = Image.open(SRC / "larry.png").getchannel("A").getbbox()
+    return x0 + HEAD_AT[0], y0 + HEAD_AT[1], x1 + HEAD_AT[0], y1 + HEAD_AT[1]
+
+
+def save_sheet(frames, name, out, fall_box, points=None, lengths=None, rects=None):
     boxes = [f.getchannel("A").getbbox() for f in frames]
     box = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
     fw, fh = box[2] - box[0], box[3] - box[1]
@@ -240,9 +315,17 @@ def save_sheet(frames, name, out, fall_box):
     for i, f in enumerate(frames):
         sheet.alpha_composite(f.crop(box), (i * fw, 0))
     sheet.save(out / f"{name}.png")
-    (out / f"{name}.json").write_text(json.dumps({
-        "frames": len(frames), "frame_w": fw, "frame_h": fh,
-        "scale": round(1.625 * fh / (fall_box[3] - fall_box[1]), 4)}))
+    meta = {"frames": len(frames), "frame_w": fw, "frame_h": fh,
+            "scale": round(1.625 * fh / (fall_box[3] - fall_box[1]), 4)}
+    for key, p in (points or {}).items():    # body points as fractions of the frame
+        x, y = T(p)
+        meta[key] = [round((x - box[0]) / fw, 4), round((y - box[1]) / fh, 4)]
+    for key, d in (lengths or {}).items():   # body lengths as fractions of the frame's height
+        meta[key] = round(d * K / fh, 4)
+    for key, (x0, y0, x1, y1) in (rects or {}).items():   # canvas rectangles as fractions of the frame
+        meta[key] = [round((x0 - box[0]) / fw, 4), round((y0 - box[1]) / fh, 4),
+                     round((x1 - box[0]) / fw, 4), round((y1 - box[1]) / fh, 4)]
+    (out / f"{name}.json").write_text(json.dumps(meta))
     return fw, fh
 
 
@@ -273,8 +356,11 @@ def main(out=SRC):
         "frames": FRAMES, "frame_w": fw, "frame_h": fh,
         "scale": round(1.625 * fh / (fall_box[3] - fall_box[1]), 4)}))
     tw, th = save_sheet([render_typing(*f) for f in TYPE_FRAMES], "larry-typing", out, fall_box)
+    rw, rh = save_sheet([render_riding(2 * math.pi * i / RIDE_FRAMES) for i in range(RIDE_FRAMES)],
+                        "larry-riding", out, fall_box, {"seat": RIDE_SEAT, "crank": RIDE_CRANK},
+                        {"pedal": RIDE_PEDAL}, {"pet_box": standing_box()})
     print(f"falling {fall_box[2] - fall_box[0]}x{fall_box[3] - fall_box[1]}, held {FRAMES} frames of {fw}x{fh}, "
-          f"typing {len(TYPE_FRAMES)} frames of {tw}x{th}")
+          f"typing {len(TYPE_FRAMES)} frames of {tw}x{th}, riding {RIDE_FRAMES} frames of {rw}x{rh}")
 
 
 if __name__ == "__main__":

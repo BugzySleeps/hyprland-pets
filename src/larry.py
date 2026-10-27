@@ -30,12 +30,15 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GtkLayerShell", "0.1")
 from gi.repository import Gdk, GLib, Gtk, GtkLayerShell  # noqa: E402
 
+import fonts  # noqa: E402
+fonts.register()    # before any window: the settings window's font
 import config  # noqa: E402
 import anim  # noqa: E402
 import scene  # noqa: E402
 import sounds  # noqa: E402
 import termchat  # noqa: E402
 import themes  # noqa: E402
+import vehicles  # noqa: E402
 import sprites  # noqa: E402
 import watch  # noqa: E402
 
@@ -144,6 +147,7 @@ class Larry(Gtk.Window):
         self.fall_sprites = self.load_fall(self.cfg)
         self.held_sprites = self.load_held(self.cfg)
         self.typing_sprites = self.load_typing(self.cfg)
+        self.riding = self.load_riding(self.cfg)
         self.poses = self.load_poses(self.cfg)
         self.lw, self.lh = self.sprites[0].get_width(), self.sprites[0].get_height()
         self.anim = anim.Compiled(self.cfg["animation"])
@@ -184,6 +188,8 @@ class Larry(Gtk.Window):
         self.asleep_since = 0.0
         self.last_chat = 0.0
         self.chats = 0            # messages typed this nap
+        self.ride = None          # riding a vehicle: {"kind", "start", "until", "end", "dist", "alt", ...}
+        self.next_ride = time.monotonic() + self.ride_gap()
         self.watcher = watch.Watcher(self.on_finished)
         self.clips = sounds.Clips(sprites.CACHE, lambda: self.cfg["pet_sounds"], lambda: self.cfg["volume"] / 100)
         threading.Thread(target=self.clips.prepare, daemon=True).start()   # so the first throw doesn't stutter
@@ -325,6 +331,8 @@ class Larry(Gtk.Window):
     def hit_rect(self):
         """Where a click grabs him. In the air: his whole arms-up pose, plus some slack (catching a
         falling pet is hard enough)."""
+        if self.ride and self.mode != "drag":
+            return self.ride_rect()
         x, y, w, h = self.larry_rect()
         if self.mode == "free" and not self.platform and not self.room:
             top = h
@@ -388,6 +396,7 @@ class Larry(Gtk.Window):
         self.poked = time.monotonic()
         on_larry = self.inside(p, self.hit_rect()) and (self.mode == "free" or self.open > 0.6)
         if on_larry:
+            self.stop_ride()
             if self.mode == "free" and not self.platform:
                 self.try_catch()
             self.x, self.y = lx, ly
@@ -659,6 +668,14 @@ class Larry(Gtk.Window):
             return None
 
     @staticmethod
+    def load_riding(cfg):
+        try:
+            return sprites.load_riding(cfg)
+        except Exception as e:   # he stands on the vehicles instead
+            print(f"larry: can't load the riding pose: {e}", file=sys.stderr)
+            return None
+
+    @staticmethod
     def load_poses(cfg):
         try:
             return sprites.load_poses(cfg)
@@ -677,6 +694,10 @@ class Larry(Gtk.Window):
         """Swap in new settings live (called by the settings window)."""
         self.watcher.configure(cfg["reactions"]["packages"], cfg["reactions"]["downloads"])
         theme_changed = cfg["theme"] != self.cfg["theme"]
+        if cfg["ride"] != self.cfg["ride"]:
+            if not cfg["ride"]["enabled"]:
+                self.end_ride()
+            self.next_ride = time.monotonic() + cfg["ride"]["every"] * 60 * random.uniform(0.6, 1.4)
         self.anim = anim.Compiled(cfg["animation"])
         sprite_keys = ("image", "size", "faces_left", "remove_bg", "outline", "accessories")
         if any(cfg[k] != self.cfg[k] for k in ("image", "size", "outline", "fall_image")):
@@ -685,6 +706,7 @@ class Larry(Gtk.Window):
         if any(cfg[k] != self.cfg[k] for k in sprite_keys):
             self.poses = self.load_poses(cfg)
             self.typing_sprites = self.load_typing(cfg)
+            self.riding = self.load_riding(cfg)
         if all(cfg[k] == self.cfg[k] for k in sprite_keys):
             new = self.sprites
         else:
@@ -783,6 +805,8 @@ class Larry(Gtk.Window):
         if self.reaction:         # hops, hearts and the speech bubble
             pad += self.lh * 1.4 + (len(self.reaction["text"] or "") * 4 if self.reaction["text"] else 0)
         self.damage(*self.larry_rect(), pad=pad)
+        if self.ride:             # the vehicle, its exhaust and the puff it appears in
+            self.damage(*self.ride_rect(), pad=12 + self.lh * 0.8 + (pad if self.reaction else 0))
 
     def tick(self):
         now = time.monotonic()
@@ -805,9 +829,12 @@ class Larry(Gtk.Window):
         if self.reaction and now > self.reaction["until"]:
             self.damage_larry()
             self.reaction = None
+        if self.ride and self.grounded():
+            self.update_ride(dt, now)
         if self.grounded():
             self.behave(now)
         elif self.mode != "box":     # up in the air: wide awake
+            self.stop_ride()
             if self.typist:
                 self.typist.stop()
                 self.typist = None
@@ -838,6 +865,247 @@ class Larry(Gtk.Window):
             self.ticking = None
             return False
         return True
+
+    # ── vehicles ────────────────────────────────────────────────────────────
+    RIDE_SCALE = 0.7    # vehicles (and him on them) are drawn this much smaller than he walks
+    RIDE_POP = 0.3      # seconds the vehicle takes to pop in / out
+    RIDE_GONE = 0.45    # ...and its puff of smoke
+
+    @property
+    def ride_L(self):
+        """His height on a vehicle (px): what the vehicles are measured in."""
+        return self.lh * self.RIDE_SCALE
+
+    def ride_gap(self):
+        return self.cfg["ride"]["every"] * 60 * random.uniform(0.6, 1.4)
+
+    def walk_range(self):
+        """Where his left edge can go where he is now (box, terminal, or window top / floor)."""
+        if self.mode == "box":
+            return 6, self.box_w - self.lw - 6
+        if self.room and self.room_rect:
+            left, _top, right, _bottom = self.room_rect
+            return left, max(right - self.lw, left)
+        if self.platform:
+            _addr, left, right, _top = self.platform
+            return max(left - self.lw / 2, 0), min(right - self.lw / 2, self.W - self.lw)
+        return 0, self.W - self.lw
+
+    def ride_margin(self, kind=None):
+        """How much further than the pet itself the vehicle sticks out, each side (px)."""
+        kind = kind or (self.ride and self.ride["kind"])
+        return max(0.0, vehicles.margin(kind) * self.ride_L - self.lw / 2) if kind else 0.0
+
+    def keep_in(self, pos, lo, hi):
+        """Turn around at the walls. Riding, the vehicle has to fit too: if it doesn't yet (it just
+        appeared by a wall) he drives back in rather than jumping."""
+        m = self.ride_margin()
+        if m:
+            lo2, hi2 = lo + m, hi - m
+            if lo2 > hi2:
+                lo2 = hi2 = (lo + hi) / 2
+            if pos < lo2:
+                self.dir = 1
+                return max(pos, lo)
+            if pos > hi2:
+                self.dir = -1
+                return min(pos, hi)
+            return pos
+        if pos <= lo or pos >= hi:
+            pos = min(max(pos, lo), hi)
+            self.dir = 1 if pos <= lo else -1
+        return pos
+
+    def start_ride(self, kind=None):
+        if not self.grounded() or self.typist:
+            return False
+        kind = kind or self.cfg["ride"]["vehicle"]
+        if kind not in vehicles.KINDS:
+            kind = random.choice(list(vehicles.KINDS))
+        lo, hi = self.walk_range()
+        if hi - lo < 2 * self.ride_margin(kind) + 8:
+            return False                    # a narrow window: no room to drive
+        now = time.monotonic()
+        self.act, self.watching, self.pause = None, False, 0
+        self.ride = {"kind": kind, "start": now, "until": now + random.uniform(14, 28), "end": None,
+                     "dist": 0.0, "alt": 0.0, "wheelie": 0.0, "next_wheelie": now + random.uniform(3, 7)}
+        self.damage_larry()
+        self.wake()
+        return True
+
+    def ride_now(self, kind=None):
+        """The settings window's "Ride now": wake him up if needed and go."""
+        if self.typist:
+            self.typist.stop()
+            self.typist = None
+        if self.act in ("sleep", "sit", "type"):
+            self.act = None
+        self.reaction = None
+        self.stop_ride()
+        if self.mode == "box":
+            self.peek(8)
+        return self.start_ride(kind)
+
+    def end_ride(self):
+        """Time's up: a helicopter lands first, then the vehicle pops away."""
+        if self.ride and self.ride["end"] is None:
+            self.ride["until"] = 0
+
+    def stop_ride(self):
+        """Gone at once (he was picked up, or fell off)."""
+        if self.ride:
+            self.damage_larry()
+            self.ride = None
+            self.next_ride = time.monotonic() + self.ride_gap()
+
+    def headroom(self):
+        """Space above his feet before the box / terminal / screen ends (px)."""
+        ground = self.larry_pos()[1] + self.lh
+        if self.mode == "box":
+            limit = self.box_geom()[1] + 2
+        elif self.room and self.room_rect:
+            limit = self.room_rect[1] + 2
+        else:
+            limit = 4
+        return ground - limit
+
+    def ride_fit(self, kind):
+        """Shrink a vehicle that's too tall for where he is (the helicopter in a short box)."""
+        return max(0.5, min(1.0, self.headroom() / (self.ride_top(kind) * self.ride_L)))
+
+    def heli_ceiling(self):
+        """How high the helicopter can fly here without its rotor leaving the box / terminal / screen."""
+        room = self.headroom() - self.ride_top("helicopter") * self.ride_L
+        return max(0.0, min(self.lh * 1.1, room))
+
+    def rider_head(self, kind):
+        """How high his head is when he's on it (in pet heights)."""
+        if self.riding:
+            frames, meta = self.riding
+            _w, h = sprites.logical_size(frames[0][0])
+            pad = sprites.PAD
+            return vehicles.SEAT[kind][1] + (pad + meta["seat"][1] * (h - 2 * pad)) / self.lh
+        _dx, lift, scale = vehicles.RIDER[kind]
+        return lift + scale
+
+    def ride_top(self, kind):
+        return vehicles.top(kind, self.rider_head(kind))
+
+    def draw_rider(self, cr, kind, L, s, frame, bob=0.0):
+        """The pet on its vehicle (cr at the vehicle's origin, scaled by s while it pops in: the pet
+        keeps its size and slides up into the seat). L: the vehicle's pet height in px."""
+        k = L / self.lh
+        cr.save()
+        cr.scale(1 / s, 1 / s)
+        if self.riding:              # Larry: sitting in the seat
+            frames, meta = self.riding
+            sprite = frames[frame % len(frames)][0]
+            w, h = sprites.logical_size(sprite)
+            pad = sprites.PAD
+            sx, sy = vehicles.SEAT[kind]
+            if kind == "bike":       # his hooves on the pedals
+                ax, ay = meta["crank"]
+                sx, sy = vehicles.BIKE_BB[0], -vehicles.BIKE_BB[1]
+            else:
+                ax, ay = meta["seat"]
+            cr.translate(sx * L * s, -sy * L * s - bob)
+            cr.scale(k, k)
+            cr.set_source_surface(sprite, -(pad + ax * (w - 2 * pad)), -(pad + ay * (h - 2 * pad)))
+            cr.paint()
+        else:                        # anyone else: standing on it
+            dx, lift, scale = vehicles.RIDER[kind]
+            cr.translate(dx * L * s, -lift * L * s)
+            sc = (1 + (scale - 1) * min(s, 1)) * k
+            cr.scale(sc, sc)
+            sprites.draw_pet(cr, self.sprites[0], 0, 0, 0, bob, 0)
+        cr.restore()
+
+    def pedal_length(self):
+        """The bike's crank length, to match his pedalling hooves (in pet heights)."""
+        if not self.riding:
+            return 0.13
+        frames, meta = self.riding
+        _w, h = sprites.logical_size(frames[0][0])
+        return meta.get("pedal", 0.05) * (h - 2 * sprites.PAD) / self.lh
+
+    def update_ride(self, dt, now):
+        r = self.ride
+        if r["end"] is not None:
+            if now - r["end"] > self.RIDE_GONE:
+                self.damage_larry()
+                self.ride = None
+                self.next_ride = now + self.ride_gap()
+            return
+        ending = now > r["until"]
+        if r["kind"] == "helicopter":
+            target = 0 if ending or now - r["start"] < self.RIDE_POP else self.heli_ceiling()
+            r["alt"] += (target - r["alt"]) * min(1.0, dt * 1.8)
+            if ending and r["alt"] < 0.6:
+                r["alt"], r["end"] = 0.0, now
+        elif ending:
+            r["end"] = now
+        if r["kind"] == "motorcycle" and self.walking and now > r["next_wheelie"]:
+            r["wheelie"], r["next_wheelie"] = now, now + random.uniform(5, 10)
+
+    def ride_rect(self):
+        """Everything the vehicle covers (where a click grabs him while riding)."""
+        x, y = self.larry_pos()
+        r = self.ride
+        L = self.ride_L
+        m = vehicles.margin(r["kind"]) * L
+        top = self.ride_top(r["kind"]) * L
+        ground = y + L - r["alt"]
+        return x + self.lw / 2 - m, ground - top, 2 * m, top
+
+    WHEELIE_TIME = 1.3
+
+    def draw_ride(self, cr, x, y, t):
+        r = self.ride
+        kind, L = r["kind"], self.ride_L
+        cx, ground = x + self.lw / 2, y + self.lh - r["alt"]
+        age = t - r["start"]
+        if r["end"] is not None:              # popping away
+            gone = (t - r["end"]) / self.RIDE_POP
+            s = max(0.0, 1 - gone) ** 2
+        else:                                 # popping in, with a little overshoot
+            p = min(1.0, age / self.RIDE_POP)
+            s = 1 + 2.7 * (p - 1) ** 3 + 1.7 * (p - 1) ** 2
+        moving = self.walking and not self.reaction
+        crank = vehicles.crank(kind, r["dist"], L)
+        frame, bob = 0, 0.0
+        if kind == "bike":
+            frame = int(crank / (2 * math.pi) * 8) % 8 if self.riding else 0   # Larry pedals
+            if not self.riding and moving:
+                bob = abs(math.sin(crank)) * L * 0.03
+        elif kind == "motorcycle" and moving:
+            bob = abs(math.sin(t * 19)) * L * 0.012
+        if s > 0.02:
+            def rider():
+                self.draw_rider(cr, kind, L, s, frame, bob)
+
+            cr.save()
+            cr.translate(cx, ground)
+            fit = self.ride_fit(kind)
+            cr.scale(self.dir * fit, fit)     # vehicles face right
+            w = t - r["wheelie"]
+            if kind == "motorcycle" and r["wheelie"] and w < self.WHEELIE_TIME:
+                up = math.sin(math.pi * w / self.WHEELIE_TIME) ** 0.6 * 0.32
+                cr.translate(vehicles.WHEELIE_PIVOT * L, 0)   # up on the back wheel
+                cr.rotate(-up)
+                cr.translate(-vehicles.WHEELIE_PIVOT * L, 0)
+            cr.scale(s, s)
+            vehicles.draw(cr, kind, L, rider, t, r["dist"], moving,
+                          head=self.rider_head(kind), pedal=self.pedal_length(), halo=self.cfg["outline"])
+            cr.restore()
+        else:                                 # all gone but the smoke: he's back on his feet
+            sprites.draw_pet(cr, self.sprites[0 if self.dir > 0 else 1], cx, y + self.lh, 0, 0, 0)
+        if age < self.RIDE_GONE:
+            vehicles.poof(cr, cx, ground - 0.35 * L, L, age / self.RIDE_GONE)
+        if r["end"] is not None:
+            vehicles.poof(cr, cx, ground - 0.35 * L, L, min(1.0, (t - r["end"]) / self.RIDE_GONE))
+        if self.reaction:
+            up = (self.rider_head(kind) - 1) * L * min(s, 1)
+            self.draw_reaction(cr, x, y - up - r["alt"], t - self.reaction["start"], self.reaction)
 
     # ── catch game ──────────────────────────────────────────────────────────
     MIN_TOSS = 60   # px he has to go up for a catch to count
@@ -972,6 +1240,7 @@ class Larry(Gtk.Window):
         self.reaction = {"mood": "happy" if ok else "sad", "start": now, "until": now + self.REACT_TIME,
                          "text": text if self.cfg["reactions"]["bubble"] else None}
         self.act, self.watching, self.poked = None, False, now   # wake up for it
+        self.end_ride()
         if self.mode == "box":
             self.peek(self.REACT_TIME + 0.3)   # pop the box open so you can see
         self.wake()
@@ -1005,6 +1274,8 @@ class Larry(Gtk.Window):
         cx, cy = x + w / 2, y + h / 2
         dist = math.hypot(self.cursor[0] - cx, self.cursor[1] - cy) if self.cursor else 1e9
         recent = now - self.cursor_moved < 2.0
+        if self.ride:
+            return
         if self.act == "type":
             if recent and dist < self.WAKE_R:          # you're back: stop mid-sentence
                 self.typist.stop()
@@ -1028,6 +1299,10 @@ class Larry(Gtk.Window):
         self.watching = b["watch"] and recent and dist < self.WATCH_R
         if self.watching and abs(self.cursor[0] - cx) > w * 0.3:
             self.dir = 1 if self.cursor[0] > cx else -1
+        if (self.cfg["ride"]["enabled"] and now >= self.next_ride and not (self.act or self.watching
+                                                                           or self.reaction or self.pause > 0)):
+            if not self.start_ride():
+                self.next_ride = now + 20      # no room here: try again in a bit
 
     MAX_CHATS = 3   # messages per nap: then he really sleeps
 
@@ -1059,6 +1334,15 @@ class Larry(Gtk.Window):
         if self.act or self.watching or self.reaction:   # busy with something else: stay put
             self.walking, self.phase = False, 0
             return 0
+        if self.ride:
+            r = self.ride
+            if r["end"] is not None or time.monotonic() - r["start"] < self.RIDE_POP:
+                self.walking = False                     # getting on / off
+                return 0
+            self.walking = True
+            dx = self.dir * speed * vehicles.SPEED[r["kind"]] * dt
+            r["dist"] += abs(dx)
+            return dx
         if self.pause > 0:
             self.pause -= dt
             self.walking, self.phase = False, 0
@@ -1076,10 +1360,7 @@ class Larry(Gtk.Window):
 
     def walk_box(self, dt):
         self.bx += self.wander(dt, self.anim.walk_speed)
-        lo, hi = 6, self.box_w - self.lw - 6
-        if self.bx <= lo or self.bx >= hi:
-            self.bx = min(max(self.bx, lo), hi)
-            self.dir = 1 if self.bx <= lo else -1
+        self.bx = self.keep_in(self.bx, *self.walk_range())
 
     def step_room(self, dt):
         """Inside a terminal: the window's bottom is the floor, its sides are walls."""
@@ -1091,9 +1372,7 @@ class Larry(Gtk.Window):
         if self.platform:
             self.y = floor
             self.x += self.wander(dt, self.anim.free_speed)
-            if self.x <= lo or self.x >= hi:
-                self.x = min(max(self.x, lo), hi)
-                self.dir = 1 if self.x <= lo else -1
+            self.x = self.keep_in(self.x, lo, hi)
             return
         self.walking = False
         self.vy += self.anim.gravity * dt
@@ -1146,10 +1425,7 @@ class Larry(Gtk.Window):
                 addr, left, right, top = p
             self.y = top - self.lh + 3
             self.x += self.wander(dt, self.anim.free_speed)
-            lo, hi = max(left - self.lw / 2, 0), min(right - self.lw / 2, self.W - self.lw)
-            if self.x <= lo or self.x >= hi:
-                self.x = min(max(self.x, lo), hi)
-                self.dir = 1 if self.x <= lo else -1
+            self.x = self.keep_in(self.x, *self.walk_range())
             return
 
         # airborne
@@ -1265,6 +1541,9 @@ class Larry(Gtk.Window):
                 tilt = max(-0.5, min(0.5, self.vx / 1500)) + math.sin(t * 15) * 0.09
             fh = sprites.logical_size(sprite)[1]   # hooves where his feet are, arms reaching up
             sprites.draw_centered(cr, sprite, x + self.lw / 2, y + self.lh - fh / 2 + 2, tilt)
+            return
+        if self.ride:
+            self.draw_ride(cr, x, y, time.monotonic())
             return
         tilt, bob, squash = self.anim.pose(self.phase, self.walking)
         tilt *= self.dir              # "forward" is whichever way he's facing
