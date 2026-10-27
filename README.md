@@ -10,6 +10,10 @@ while anything is fullscreen.
 The default pet is **Larry the Cow**, but any picture works, and almost everything else is
 customisable from a settings window: the box's scene, the pet's accessories, and how it moves.
 
+[![Watch the showcase video (40 s)](docs/showcase.jpg)](docs/showcase.mp4)
+
+*Click to watch the 40-second showcase (with sound).*
+
 ![The Box page: arranging the scene](docs/box.png)
 
 ## Features
