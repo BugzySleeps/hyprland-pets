@@ -9,7 +9,10 @@ on the pet is a small table in the config:
     behind  draw it behind the pet instead of in front
 always in the pet's facing-right frame (the facing-left sprite is a mirror of the whole thing).
 """
+import datetime
+import json
 import math
+import os
 
 import cairo
 
@@ -375,6 +378,321 @@ PREMADE = {
 }
 
 
+# ── seasonal: only claimable around their holiday, yours forever once claimed ──
+def heart(cr, cx, cy, r):
+    cr.move_to(cx, cy + r * 0.9)
+    cr.curve_to(cx - r * 1.3, cy + r * 0.05, cx - r * 0.9, cy - r * 1.05, cx, cy - r * 0.35)
+    cr.curve_to(cx + r * 0.9, cy - r * 1.05, cx + r * 1.3, cy + r * 0.05, cx, cy + r * 0.9)
+    cr.close_path()
+
+
+def tube(cr, pts, w, colour):
+    """A thick inked stroke (antlers, stalks)."""
+    for width, c in ((w + LW * 2, INK), (w, colour)):
+        cr.set_source_rgb(*c)
+        cr.set_line_width(width)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        cr.set_line_join(cairo.LINE_JOIN_ROUND)
+        for a, b in pts:
+            cr.move_to(*a)
+            cr.line_to(*b)
+        cr.stroke()
+
+
+def pumpkin(cr):
+    orange, deep = (0.98, 0.55, 0.16), (0.9, 0.42, 0.1)
+    tube(cr, [((0.0, -0.24), (0.06, -0.42))], 0.07, (0.42, 0.3, 0.16))
+    cr.move_to(0.04, -0.33)
+    cr.curve_to(0.18, -0.46, 0.32, -0.38, 0.3, -0.3)
+    cr.curve_to(0.2, -0.26, 0.1, -0.28, 0.04, -0.33)
+    inked(cr, (0.38, 0.68, 0.3), LW * 0.8)
+    for cx, rx in ((-0.25, 0.22), (0.25, 0.22)):
+        ellipse(cr, cx, 0.06, rx, 0.3)
+        inked(cr, deep)
+    ellipse(cr, 0, 0.05, 0.25, 0.32)
+    inked(cr, orange)
+    glow = (1.0, 0.86, 0.3)
+    for sx in (-1, 1):
+        poly(cr, (sx * 0.1, 0.0), (sx * 0.26, 0.0), (sx * 0.19, -0.13))
+        inked(cr, glow, LW * 0.7)
+    cr.move_to(-0.19, 0.08)
+    cr.curve_to(-0.12, 0.3, 0.12, 0.3, 0.19, 0.08)
+    cr.curve_to(0.08, 0.15, -0.08, 0.15, -0.19, 0.08)
+    cr.close_path()
+    inked(cr, glow, LW * 0.7)
+    for x in (-0.07, 0.05):                  # two snaggle teeth
+        rrect(cr, x, 0.12, x + 0.05, 0.18, 0.01)
+        inked(cr, orange, LW * 0.6)
+    shine(cr, -0.14, -0.16, -0.18, -0.04, 0.04, 0.4)
+
+
+def witch_hat(cr):
+    dark = (0.22, 0.17, 0.3)
+    ellipse(cr, 0, 0.44, 0.5, 0.1)
+    inked(cr, dark)
+    cr.move_to(-0.27, 0.44)
+    cr.curve_to(-0.22, 0.05, -0.12, -0.25, 0.0, -0.38)
+    cr.curve_to(0.12, -0.5, 0.26, -0.5, 0.36, -0.42)
+    cr.curve_to(0.22, -0.4, 0.12, -0.3, 0.1, -0.15)
+    cr.curve_to(0.12, 0.1, 0.2, 0.3, 0.27, 0.44)
+    cr.close_path()
+    inked(cr, dark)
+    cr.move_to(-0.255, 0.3)
+    cr.line_to(0.25, 0.3)
+    cr.line_to(0.27, 0.43)
+    cr.curve_to(0.1, 0.47, -0.1, 0.47, -0.268, 0.43)
+    cr.close_path()
+    inked(cr, (0.95, 0.52, 0.16))
+    rrect(cr, -0.08, 0.28, 0.08, 0.46, 0.02)
+    inked(cr, (1.0, 0.82, 0.25), LW * 0.8)
+    rrect(cr, -0.035, 0.32, 0.035, 0.42, 0.01)
+    inked(cr, (0.95, 0.52, 0.16), LW * 0.6)
+    shine(cr, -0.14, 0.2, -0.06, -0.12)
+
+
+def santa_hat(cr):
+    red = (0.86, 0.16, 0.2)
+    cr.move_to(-0.36, 0.24)
+    cr.curve_to(-0.3, -0.2, 0.0, -0.42, 0.24, -0.32)
+    cr.curve_to(0.4, -0.25, 0.44, -0.05, 0.4, 0.06)
+    cr.curve_to(0.3, -0.06, 0.24, -0.06, 0.2, 0.0)
+    cr.line_to(0.36, 0.24)
+    cr.close_path()
+    inked(cr, red)
+    shine(cr, -0.2, 0.06, -0.08, -0.2)
+    for cx, cy, r in ((0.38, 0.12, 0.1),):
+        circle(cr, cx, cy, r)
+        inked(cr, (0.98, 0.98, 0.98))
+    cr.move_to(-0.44, 0.22)
+    for i in range(9):
+        x = -0.44 + i * 0.11
+        cr.curve_to(x + 0.02, 0.17, x + 0.09, 0.17, x + 0.11, 0.21 + (0.01 if i % 2 else -0.01))
+    cr.curve_to(0.5, 0.33, 0.47, 0.44, 0.42, 0.44)
+    for i in range(9):
+        x = 0.42 - i * 0.107
+        cr.curve_to(x - 0.02, 0.48, x - 0.09, 0.48, x - 0.107, 0.44)
+    cr.curve_to(-0.5, 0.42, -0.5, 0.26, -0.44, 0.22)
+    cr.close_path()
+    inked(cr, (0.98, 0.98, 0.98))
+
+
+def antlers(cr):
+    brown = (0.6, 0.4, 0.24)
+
+    def side():
+        tube(cr, [((-0.13, 0.26), (-0.27, 0.0)), ((-0.27, 0.0), (-0.38, -0.24)),
+                  ((-0.24, -0.06), (-0.1, -0.22)), ((-0.33, -0.14), (-0.48, -0.1)),
+                  ((-0.37, -0.22), (-0.3, -0.36))], 0.065, brown)
+    mirrored(cr, side)
+    for sx in (-1, 1):                      # little furry bases
+        ellipse(cr, sx * 0.14, 0.27, 0.08, 0.05)
+        inked(cr, (0.48, 0.3, 0.18), LW * 0.8)
+
+
+def star_glasses(cr):
+    gold = (1.0, 0.8, 0.22)
+    for cx in (-0.25, 0.25):
+        star(cr, cx, 0.0, 0.25)
+        inked(cr, gold)
+        circle(cr, cx, 0.02, 0.09)
+        inked(cr, (0.12, 0.1, 0.18), LW * 0.7)
+        shine(cr, cx - 0.04, -0.02, cx - 0.01, -0.05, 0.025, 0.7)
+    for x, y, r, c in ((-0.05, -0.17, 0.03, (0.98, 0.45, 0.66)), (0.48, -0.17, 0.035, (0.45, 0.85, 0.95)),
+                       (-0.47, 0.14, 0.03, (0.6, 0.9, 0.45))):
+        star(cr, x, y, r * 1.6)
+        cr.set_source_rgb(*c)
+        cr.fill()
+
+
+def heart_boppers(cr):
+    pink = (0.98, 0.4, 0.58)
+    cr.set_source_rgb(*INK)
+    cr.set_line_width(0.025)
+    for sx in (-1, 1):                      # springy stalks
+        cr.move_to(sx * 0.2, 0.28)
+        for i in range(1, 7):
+            cr.line_to(sx * (0.2 + 0.03 * i / 6) + (0.035 if i % 2 else -0.035), 0.28 - i * 0.065)
+        cr.stroke()
+    cr.arc(0, 0.62, 0.42, math.pi * 1.22, math.pi * 1.78)
+    tube_path = cr.copy_path()
+    cr.new_path()
+    for w, c in ((0.08 + LW * 2, INK), (0.08, pink)):
+        cr.append_path(tube_path)
+        cr.set_source_rgb(*c)
+        cr.set_line_width(w)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        cr.stroke()
+    for sx in (-1, 1):
+        heart(cr, sx * 0.25, -0.2, 0.17)
+        inked(cr, (0.92, 0.18, 0.34))
+        shine(cr, sx * 0.25 - 0.08, -0.26, sx * 0.25 - 0.05, -0.2, 0.03, 0.55)
+
+
+def lucky_hat(cr):
+    green, dark = (0.2, 0.62, 0.32), (0.13, 0.44, 0.22)
+    ellipse(cr, 0, 0.3, 0.5, 0.1)
+    inked(cr, green)
+    poly(cr, (-0.28, 0.3), (-0.32, -0.3), (0.32, -0.3), (0.28, 0.3))
+    inked(cr, green)
+    ellipse(cr, 0, -0.3, 0.32, 0.055)
+    inked(cr, dark)
+    poly(cr, (-0.29, 0.1), (-0.285, 0.24), (0.285, 0.24), (0.29, 0.1))
+    inked(cr, (0.14, 0.12, 0.12))
+    rrect(cr, -0.08, 0.08, 0.08, 0.26, 0.02)
+    inked(cr, (1.0, 0.8, 0.22), LW * 0.8)
+    rrect(cr, -0.035, 0.12, 0.035, 0.22, 0.01)
+    inked(cr, (0.14, 0.12, 0.12), LW * 0.5)
+    for i in range(3):                       # a shamrock tucked in the band
+        cr.save()
+        cr.translate(0.22, 0.02)
+        cr.rotate(-0.3 + i * 2 * math.pi / 3)
+        heart(cr, 0, -0.07, 0.07)
+        cr.restore()
+        inked(cr, (0.45, 0.85, 0.4), LW * 0.6)
+    shine(cr, -0.2, -0.2, -0.18, 0.04)
+
+
+def bunny_ears(cr):
+    def ear():
+        cr.save()
+        cr.translate(-0.17, 0.16)
+        cr.rotate(-0.22)
+        ellipse(cr, 0, -0.2, 0.13, 0.32)
+        inked(cr, (0.98, 0.97, 0.96))
+        ellipse(cr, 0, -0.17, 0.06, 0.23)
+        cr.set_source_rgb(1.0, 0.7, 0.78)
+        cr.fill()
+        cr.restore()
+    mirrored(cr, ear)
+    cr.arc(0, 0.75, 0.42, math.pi * 1.25, math.pi * 1.75)
+    path = cr.copy_path()
+    cr.new_path()
+    for w, c in ((0.07 + LW * 2, INK), (0.07, (1.0, 0.7, 0.78))):
+        cr.append_path(path)
+        cr.set_source_rgb(*c)
+        cr.set_line_width(w)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        cr.stroke()
+
+
+# key: (title, (month, day) first day, (month, day) last day)
+SEASONS = {
+    "halloween": ("Halloween", (10, 15), (11, 3)),
+    "christmas": ("Christmas", (12, 1), (12, 27)),
+    "newyear":   ("New Year", (12, 28), (1, 7)),
+    "valentine": ("Valentine's Day", (2, 7), (2, 16)),
+    "stpatrick": ("St. Patrick's Day", (3, 10), (3, 20)),
+    "spring":    ("Spring", (3, 25), (4, 25)),
+}
+# key: (title, aspect, painter, Larry's placement (x, y, scale), season)
+SEASONAL = {
+    "pumpkin":       ("Pumpkin", 1.0, pumpkin, (0.71, 0.04, 0.36), "halloween"),
+    "witch_hat":     ("Witch hat", 1.0, witch_hat, (0.71, -0.02, 0.46), "halloween"),
+    "santa_hat":     ("Santa hat", 0.95, santa_hat, (0.71, 0.06, 0.38), "christmas"),
+    "antlers":       ("Antlers", 0.7, antlers, (0.71, 0.06, 0.42), "christmas"),
+    "star_glasses":  ("Star glasses", 0.55, star_glasses, (0.705, 0.35, 0.38), "newyear"),
+    "heart_boppers": ("Heart boppers", 0.95, heart_boppers, (0.71, 0.06, 0.36), "valentine"),
+    "lucky_hat":     ("Lucky hat", 0.75, lucky_hat, (0.71, 0.05, 0.38), "stpatrick"),
+    "bunny_ears":    ("Bunny ears", 1.15, bunny_ears, (0.71, -0.02, 0.36), "spring"),
+}
+CLAIMS = library.ROOT / "claimed.json"
+
+
+def _window(season, today):
+    """(first, last) dates of this season's window that today is in or comes before."""
+    _t, (m0, d0), (m1, d1) = SEASONS[season]
+    for year in (today.year - 1, today.year):
+        first = datetime.date(year, m0, d0)
+        last = datetime.date(year + ((m1, d1) < (m0, d0)), m1, d1)
+        if today <= last:
+            return first, last
+    return datetime.date(today.year + 1, m0, d0), datetime.date(today.year + 1 + ((m1, d1) < (m0, d0)), m1, d1)
+
+
+def in_season(season, today=None):
+    today = today or datetime.date.today()
+    first, last = _window(season, today)
+    return first <= today <= last
+
+
+def season_ends(season, today=None):
+    return _window(season, today or datetime.date.today())[1]
+
+
+def season_starts(season, today=None):
+    """The next first day of the season (today's window if it hasn't started yet)."""
+    today = today or datetime.date.today()
+    first, last = _window(season, today)
+    if first <= today:
+        first = datetime.date(first.year + 1, first.month, first.day)
+    return first
+
+
+def _load_claims():
+    try:
+        with open(CLAIMS) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_claims(data):
+    try:
+        CLAIMS.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CLAIMS.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=1))
+        os.replace(tmp, CLAIMS)
+    except OSError:
+        pass
+
+
+def claimed(acc_id):
+    return acc_id in (_load_claims().get("claimed") or {})
+
+
+def claimable(acc_id):
+    return acc_id in SEASONAL and not claimed(acc_id) and in_season(SEASONAL[acc_id][4])
+
+
+def claim(acc_id):
+    """Keep it for good. Only works while its season is on."""
+    if not claimable(acc_id):
+        return False
+    data = _load_claims()
+    data.setdefault("claimed", {})[acc_id] = datetime.date.today().isoformat()
+    _save_claims(data)
+    return True
+
+
+def owned_seasonal():
+    have = _load_claims().get("claimed") or {}
+    return [k for k in SEASONAL if k in have]
+
+
+def new_season():
+    """The season with something left to claim that hasn't been announced yet this year, or None.
+    Marks it announced."""
+    data = _load_claims()
+    have = data.get("claimed") or {}
+    told = data.setdefault("announced", [])
+    for season in SEASONS:
+        if not in_season(season):
+            continue
+        tag = f"{season}-{season_ends(season).year}"
+        if tag in told or all(k in have for k, v in SEASONAL.items() if v[4] == season):
+            continue
+        told.append(tag)
+        data["announced"] = told[-24:]
+        _save_claims(data)
+        return season
+    return None
+
+
+def _entry(acc_id):
+    return PREMADE.get(acc_id) or SEASONAL.get(acc_id)
+
+
 # ── your own pictures (~/.config/larry/accessories/) ────────────────────────
 def customs():
     return library.items("accessories")
@@ -396,18 +714,20 @@ def delete_image(acc_id):
 def known(acc_id):
     if acc_id in PREMADE:
         return True
+    if acc_id in SEASONAL:
+        return claimed(acc_id)
     return library.valid("accessories", acc_id)
 
 
 def title(acc_id):
-    if acc_id in PREMADE:
-        return PREMADE[acc_id][0]
+    if _entry(acc_id):
+        return _entry(acc_id)[0]
     return library.title(acc_id)
 
 
 def aspect(acc_id):
-    if acc_id in PREMADE:
-        return PREMADE[acc_id][1]
+    if _entry(acc_id):
+        return _entry(acc_id)[1]
     s = surface(acc_id)
     return s.get_height() / s.get_width() if s else 1.0
 
@@ -415,8 +735,8 @@ def aspect(acc_id):
 def paint(cr, acc_id):
     """Draw the accessory into its unit box (1 wide, centred on the origin)."""
     cr.save()
-    if acc_id in PREMADE:
-        PREMADE[acc_id][2](cr)
+    if _entry(acc_id):
+        _entry(acc_id)[2](cr)
     else:
         s = surface(acc_id)
         if s:
@@ -430,7 +750,7 @@ def paint(cr, acc_id):
 
 def default_place(acc_id, anchor=LARRY_ANCHOR):
     """Starting spot: tuned on Larry, shifted to wherever this pet's head is."""
-    x, y, scale = PREMADE[acc_id][3] if acc_id in PREMADE else (LARRY_ANCHOR[0], 0.02, 0.36)
+    x, y, scale = _entry(acc_id)[3] if _entry(acc_id) else (LARRY_ANCHOR[0], 0.02, 0.36)
     dx, dy = anchor[0] - LARRY_ANCHOR[0], anchor[1] - LARRY_ANCHOR[1]
     return {"x": round(x + dx, 4), "y": round(y + dy, 4), "scale": scale, "rotate": 0, "flip": False, "behind": False}
 
@@ -504,6 +824,6 @@ def signature(items):
     """Changes whenever the accessories (or a custom picture's file) change."""
     parts = []
     for acc_id, it in items.items():
-        extra = "" if acc_id in PREMADE else library.mtime("accessories", acc_id)
+        extra = "" if _entry(acc_id) else library.mtime("accessories", acc_id)
         parts.append(f"{acc_id}:{sorted(it.items())}:{extra}")
     return ";".join(parts)

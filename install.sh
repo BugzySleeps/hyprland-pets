@@ -14,7 +14,7 @@
 #   install.sh --uninstall   remove it again (keeps your settings in ~/.config/larry)
 set -u
 
-VERSION="v1.2.0"
+VERSION="v1.2.1"
 REPO="BugzySleeps/hyprland-pets"
 DEST="${XDG_DATA_HOME:-$HOME/.local/share}/hyprland-pets"
 BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
@@ -127,6 +127,11 @@ check_all() {
         good "GStreamer + pulsesink (settings sounds)"
     else
         meh "GStreamer + pulsesink (optional: without it the settings window is silent)"
+    fi
+    if command -v cava >/dev/null; then
+        good "cava (dancing in time with music)"
+    else
+        meh "cava (optional: without it the pet dances to music at a steady 120 BPM)"
     fi
 }
 

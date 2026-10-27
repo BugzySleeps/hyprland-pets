@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Draws Larry's upright poses from his standing picture (src/larry.png):
 
-  src/larry-falling.png   thrown / falling: stands up, front legs raised like arms
+  src/larry-falling.png   thrown / falling: stands up, front legs raised like arms (+ larry-falling.json:
+                          where his standing picture's box lands, so accessories fit on it)
   src/larry-held.png      held: the same pose with all four legs waddling, 8 frames side by side
   src/larry-held.json     frame count and size, for sprites.py
   src/larry-typing.png    sitting on his butt with a mini keyboard on his lap, tapping it with his
@@ -300,11 +301,18 @@ def render_riding(angle):
     return Image.frombuffer("RGBA", (800, 1000), bytes(surf.get_data()), "raw", "BGRa", surf.get_stride(), 1)
 
 
-def standing_box():
+def standing_box(dy=0):
     """Where Larry's standing picture (as the pet sprite crops it) would sit on the canvas: his head
     is copied from it unscaled at HEAD_AT, so accessories fitted to it can go on these poses too."""
     x0, y0, x1, y1 = Image.open(SRC / "larry.png").getchannel("A").getbbox()
-    return x0 + HEAD_AT[0], y0 + HEAD_AT[1], x1 + HEAD_AT[0], y1 + HEAD_AT[1]
+    return x0 + HEAD_AT[0], y0 + HEAD_AT[1] + dy, x1 + HEAD_AT[0], y1 + HEAD_AT[1] + dy
+
+
+def box_in(rect, box):
+    """A canvas rectangle as fractions of a crop box."""
+    fw, fh = box[2] - box[0], box[3] - box[1]
+    return [round((rect[0] - box[0]) / fw, 4), round((rect[1] - box[1]) / fh, 4),
+            round((rect[2] - box[0]) / fw, 4), round((rect[3] - box[1]) / fh, 4)]
 
 
 def save_sheet(frames, name, out, fall_box, points=None, lengths=None, rects=None):
@@ -322,9 +330,8 @@ def save_sheet(frames, name, out, fall_box, points=None, lengths=None, rects=Non
         meta[key] = [round((x - box[0]) / fw, 4), round((y - box[1]) / fh, 4)]
     for key, d in (lengths or {}).items():   # body lengths as fractions of the frame's height
         meta[key] = round(d * K / fh, 4)
-    for key, (x0, y0, x1, y1) in (rects or {}).items():   # canvas rectangles as fractions of the frame
-        meta[key] = [round((x0 - box[0]) / fw, 4), round((y0 - box[1]) / fh, 4),
-                     round((x1 - box[0]) / fw, 4), round((y1 - box[1]) / fh, 4)]
+    for key, rect in (rects or {}).items():   # canvas rectangles as fractions of the frame
+        meta[key] = box_in(rect, box)
     (out / f"{name}.json").write_text(json.dumps(meta))
     return fw, fh
 
@@ -333,6 +340,7 @@ def main(out=SRC):
     falling = render()
     fall_box = falling.getchannel("A").getbbox()
     falling.crop(fall_box).save(out / "larry-falling.png")
+    (out / "larry-falling.json").write_text(json.dumps({"pet_box": box_in(standing_box(), fall_box)}))
     frames = []
     for i in range(FRAMES):
         ph = 2 * math.pi * i / FRAMES
@@ -354,8 +362,9 @@ def main(out=SRC):
     # same scale as the falling pose: its height (767 px) is 1.625x Larry's standing height
     (out / "larry-held.json").write_text(json.dumps({
         "frames": FRAMES, "frame_w": fw, "frame_h": fh,
-        "scale": round(1.625 * fh / (fall_box[3] - fall_box[1]), 4)}))
-    tw, th = save_sheet([render_typing(*f) for f in TYPE_FRAMES], "larry-typing", out, fall_box)
+        "scale": round(1.625 * fh / (fall_box[3] - fall_box[1]), 4), "pet_box": box_in(standing_box(), box)}))
+    tw, th = save_sheet([render_typing(*f) for f in TYPE_FRAMES], "larry-typing", out, fall_box,
+                        rects={"pet_box": standing_box(6)})
     rw, rh = save_sheet([render_riding(2 * math.pi * i / RIDE_FRAMES) for i in range(RIDE_FRAMES)],
                         "larry-riding", out, fall_box, {"seat": RIDE_SEAT, "crank": RIDE_CRANK},
                         {"pedal": RIDE_PEDAL}, {"pet_box": standing_box()})

@@ -1,8 +1,10 @@
 """The settings window. Every change applies to the running pet immediately and is saved."""
 import copy
+import json
 import math
 import random
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -13,6 +15,8 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 import accessories  # noqa: E402
+import music  # noqa: E402
+import packs  # noqa: E402
 import anim  # noqa: E402
 import config  # noqa: E402
 import library  # noqa: E402
@@ -27,9 +31,10 @@ from fitting_room import FittingRoom  # noqa: E402
 from scene_editor import SceneEditor  # noqa: E402
 
 ZOOM = 1.7  # the big preview's magnification
-NAV_GROUPS = [("Your pet", ["pet", "acc", "anim", "fun"]), ("Around it", ["box", "theme"])]
+NAV_GROUPS = [("Your pet", ["pet", "pets", "acc", "anim", "fun"]), ("Around it", ["box", "theme"])]
 PAGES = [
     ("pet", "Pet", "face-smile-symbolic", "Who lives in the box, and how they look"),
+    ("pets", "My pets", "system-users-symbolic", "Switch between your pets, and share them as pet packs"),
     ("box", "Box", "weather-clear-symbolic", "The little world your pet walks around in"),
     ("anim", "Animation", "media-playback-start-symbolic", "How your pet moves: shape it with the graphs"),
     ("acc", "Accessories", "starred-symbolic", "Dress your pet up, then drag things around until they fit"),
@@ -103,6 +108,14 @@ class Settings(Gtk.Window):
         super().__init__(title=f"{pet.cfg['name']} settings")
         self.pet = pet
         self.cfg = copy.deepcopy(pet.cfg)
+        if not packs.read(self.cfg["pet"]):   # first time: the pet you have becomes your first saved pet
+            try:
+                _slug, self.cfg = packs.save(self.cfg)
+                config.save(self.cfg)
+                pet.set_config(copy.deepcopy(self.cfg))
+            except Exception as e:
+                print(f"larry: can't save the pet: {e}", file=sys.stderr)
+        self.pet_thumbs = {}              # slug -> (signature, sprite) for the My pets tiles
         self.syncing = True               # no sounds/saves while building
         self.size_timer = self.saved_timer = self.acc_timer = self.scene_timer = None
         self.choice_pics = {}             # ground/sky tile previews (rebuilt when pictures change)
@@ -198,6 +211,10 @@ class Settings(Gtk.Window):
                 dot.pack_start(img, True, True, 0)
                 row.pack_start(dot, False, False, 0)
                 row.pack_start(label(title, "nav-label"), False, False, 0)
+                if key == "acc":       # a dot while there's a seasonal accessory to claim
+                    self.claim_dot = css_class(Gtk.Box(valign=Gtk.Align.CENTER), "claim-dot")
+                    self.claim_dot.set_no_show_all(True)
+                    row.pack_start(self.claim_dot, False, False, 0)
                 b.add(row)
                 b.snd = "whoosh"
                 b.connect("toggled", self.on_nav, key)
@@ -256,7 +273,7 @@ class Settings(Gtk.Window):
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=180)
         self.pages = {}
-        for key, build in (("pet", self.pet_page), ("box", self.box_page), ("anim", self.anim_page),
+        for key, build in (("pet", self.pet_page), ("pets", self.pets_page), ("box", self.box_page), ("anim", self.anim_page),
                            ("acc", self.acc_page), ("fun", self.fun_page), ("theme", self.theme_page)):
             self.building = key      # cards made now belong to this page (for search)
             page = build()
@@ -382,6 +399,228 @@ class Settings(Gtk.Window):
         page.pack_start(c, False, False, 0)
 
         return page
+
+    # ── my pets / pet packs ─────────────────────────────────────────────────
+    def pets_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin_end=12)
+
+        new = icon_button("New pet", "list-add-symbolic", "Start a new pet (as Larry; change it on the Pet page)")
+        new.connect("clicked", self.on_new_pet)
+        c = self.card("My pets", "Click one to switch. Each remembers its picture, name, size, accessories and "
+                                 "animation, and the one you're using saves itself as you change it", new)
+        self.pets_flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                                     min_children_per_line=3, max_children_per_line=6,
+                                     column_spacing=10, row_spacing=10)
+        c.pack_start(self.pets_flow, False, False, 0)
+        page.pack_start(c, False, False, 0)
+
+        c = self.card("Share", f"Export this pet as one {packs.EXT} file anyone can import: its picture, "
+                               "accessories (your own pictures too), size and animation. Seasonal accessories "
+                               "only come along for people who've claimed them")
+        self.pack_author = Gtk.Entry(placeholder_text="Your name (optional)", max_length=40)
+        self.pack_author.connect("changed", lambda e: self.on_pack_info("author", e.get_text()))
+        c.pack_start(self.setting_row("Made by", self.pack_author), False, False, 0)
+        self.pack_desc = Gtk.Entry(placeholder_text="A line about it (optional)", max_length=120)
+        self.pack_desc.connect("changed", lambda e: self.on_pack_info("description", e.get_text()))
+        c.pack_start(self.setting_row("About", self.pack_desc), False, False, 0)
+        row = Gtk.Box(spacing=10)
+        exp = icon_button("Export this pet…", "document-save-symbolic")
+        exp.connect("clicked", self.on_export_pet)
+        row.pack_start(exp, False, False, 0)
+        imp = icon_button("Import a pet pack…", "document-open-symbolic", f"Add a {packs.EXT} file to your pets")
+        imp.connect("clicked", self.on_import_pet)
+        row.pack_start(imp, False, False, 0)
+        c.pack_start(row, False, False, 0)
+        self.pack_status = label("", "row-sub", xalign=0, wrap=True)
+        c.pack_start(self.pack_status, False, False, 0)
+        c.pack_start(label(f"Tip: you can also drop a {packs.EXT} file onto this window", "card-sub", xalign=0),
+                     False, False, 0)
+        page.pack_start(c, False, False, 0)
+
+        # drop a pack anywhere on the window
+        self.drag_dest_set(Gtk.DestDefaults.ALL, [Gtk.TargetEntry.new("text/uri-list", 0, 0)], Gdk.DragAction.COPY)
+        self.connect("drag-data-received", self.on_pack_drop)
+        self.fill_pets()
+        self.pets_built = True
+        return page
+
+    def fill_pets(self):
+        for child in self.pets_flow.get_children():
+            self.pets_flow.remove(child)
+        self.pet_tiles = {}
+        group = None
+        was, self.syncing = self.syncing, True
+        for slug, info in packs.saved():
+            b = Gtk.RadioButton(group=group)
+            group = group or b
+            b.set_mode(False)
+            css_class(b, "tile")
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            pic = Gtk.DrawingArea()
+            pic.set_size_request(110, 84)
+            pic.connect("draw", lambda w, cr, sl=slug: self.draw_pet_tile(cr, w.get_allocated_width(),
+                                                                         w.get_allocated_height(), sl))
+            inner.pack_start(pic, False, False, 0)
+            name = label(info.get("name") or slug, "tile-label", xalign=0.5)
+            name.set_ellipsize(3)
+            name.set_max_width_chars(14)
+            inner.pack_start(name, False, False, 0)
+            by = info.get("author")
+            sub = label(f"by {by}" if by else ("Using now" if slug == self.cfg["pet"] else " "), "season-status",
+                        xalign=0.5)
+            sub.set_ellipsize(3)
+            sub.set_max_width_chars(16)
+            inner.pack_start(sub, False, False, 0)
+            b.add(inner)
+            b.set_active(slug == self.cfg["pet"])
+            b.connect("toggled", lambda btn, sl=slug: btn.get_active() and self.switch_pet(sl))
+            b.pic = pic
+            over = Gtk.Overlay()
+            over.add(b)
+            if slug != self.cfg["pet"]:
+                x = css_class(Gtk.Button(halign=Gtk.Align.END, valign=Gtk.Align.START), "tile-x")
+                x.set_image(Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU))
+                x.set_tooltip_text("Delete this pet")
+                x.connect("clicked", lambda _b, sl=slug: self.on_delete_pet(sl))
+                over.add_overlay(x)
+            if getattr(self, "pets_built", False):   # the first lot get theirs with everything else
+                self.hook_sounds(over)
+            self.pets_flow.add(over)
+            self.pet_tiles[slug] = b
+        self.syncing = was
+        self.pets_flow.show_all()
+        info = packs.read(self.cfg["pet"]) or {}
+        was, self.syncing = self.syncing, True
+        self.pack_author.set_text(info.get("author", ""))
+        self.pack_desc.set_text(info.get("description", ""))
+        self.syncing = was
+
+    def draw_pet_tile(self, cr, w, h, slug):
+        c = self.pet.colors
+        rounded(cr, 0, 0, w, h, 14)
+        cr.clip()
+        cr.set_source_rgba(*c["fg"], 0.05)
+        cr.paint()
+        if slug == self.cfg["pet"]:
+            pcfg = self.cfg
+        else:
+            info = packs.read(slug)
+            if not info:
+                return
+            pcfg = packs.pet_cfg(self.cfg, slug, info)
+        sig = json.dumps({k: pcfg[k] for k in (*packs.PET_KEYS, "image")}, sort_keys=True, default=str)
+        hit = self.pet_thumbs.get(slug)
+        if not hit or hit[0] != sig:
+            try:
+                hit = (sig, sprites.load({**pcfg, "size": 72})[0])
+            except Exception:
+                hit = (sig, None)
+            self.pet_thumbs[slug] = hit
+        sprite = hit[1]
+        if not sprite:
+            return
+        sw, sh = sprite.get_width(), sprite.get_height()
+        k = min((w - 16) / sw, (h - 12) / sh, 1.2)
+        cr.translate((w - sw * k) / 2, h - 6 - sh * k)
+        cr.scale(k, k)
+        cr.set_source_surface(sprite, 0, 0)
+        cr.paint()
+
+    def switch_pet(self, slug):
+        if self.syncing or slug == self.cfg["pet"]:
+            return
+        info = packs.read(slug)
+        if not info:
+            self.fill_pets()
+            return
+        new = packs.pet_cfg(self.cfg, slug, info)
+        self.fill_custom()
+        self.sync(new)            # move every control over without saving...
+        self.apply()              # ...then save once, as this pet
+        self.fill_pets()
+        self.pack_status.set_text("")
+
+    def on_new_pet(self, _b):
+        fresh = copy.deepcopy(self.cfg)
+        for k in packs.PET_KEYS:
+            fresh[k] = copy.deepcopy(config.DEFAULTS[k])
+        fresh["image"], fresh["fall_image"] = config.DEFAULTS["image"], config.DEFAULTS["fall_image"]
+        fresh["name"] = "New pet"
+        slug, _c = packs.save(fresh)
+        self.switch_pet(slug)
+        self.nav["pet"].set_active(True)
+
+    def on_delete_pet(self, slug):
+        info = packs.read(slug) or {}
+        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                              buttons=Gtk.ButtonsType.NONE, text=f"Delete {info.get('name') or slug}?")
+        d.format_secondary_text("It's gone for good, unless you exported it as a pet pack.")
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Delete", Gtk.ResponseType.ACCEPT)
+        if d.run() == Gtk.ResponseType.ACCEPT:
+            packs.delete(slug)
+            self.pet_thumbs.pop(slug, None)
+            self.sound.play("pop_down")
+            self.fill_pets()
+        d.destroy()
+
+    def on_pack_info(self, key, value):
+        if not self.syncing:
+            packs.update_info(self.cfg["pet"], **{key: value.strip()})
+
+    def on_export_pet(self, _b):
+        d = Gtk.FileChooserDialog(title="Export pet pack", transient_for=self, action=Gtk.FileChooserAction.SAVE)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Export", Gtk.ResponseType.ACCEPT)
+        d.set_do_overwrite_confirmation(True)
+        d.set_current_name(re.sub(r"[^\w-]+", "-", self.cfg["name"]).strip("-").lower() + packs.EXT)
+        folder_ = Path.home() / "Downloads"
+        d.set_current_folder(str(folder_ if folder_.is_dir() else Path.home()))
+        if d.run() == Gtk.ResponseType.ACCEPT:
+            try:
+                self.apply()
+                out = packs.export(self.cfg["pet"], d.get_filename())
+                self.pack_status.set_text(f"Saved {out.name} in {out.parent}")
+                self.sound.play("on")
+            except Exception as e:
+                self.pack_status.set_text(f"Couldn't export: {e}")
+        d.destroy()
+
+    def on_import_pet(self, _b):
+        d = Gtk.FileChooserDialog(title="Import pet pack", transient_for=self, action=Gtk.FileChooserAction.OPEN)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Import", Gtk.ResponseType.ACCEPT)
+        f = Gtk.FileFilter()
+        f.set_name("Pet packs")
+        f.add_pattern("*" + packs.EXT)
+        d.add_filter(f)
+        folder_ = Path.home() / "Downloads"
+        if folder_.is_dir():
+            d.set_current_folder(str(folder_))
+        path = d.get_filename() if d.run() == Gtk.ResponseType.ACCEPT else None
+        d.destroy()
+        if path:
+            self.import_pack(path)
+
+    def on_pack_drop(self, _w, _ctx, _x, _y, data, _info, _time):
+        for uri in data.get_uris() or []:
+            path = GLib.filename_from_uri(uri)[0] if uri.startswith("file://") else None
+            if path and path.endswith(packs.EXT):
+                self.nav["pets"].set_active(True)
+                self.import_pack(path)
+
+    def import_pack(self, path):
+        try:
+            slug = packs.install(path)
+        except packs.PackError as e:
+            self.pack_status.set_text(f"Couldn't import {Path(path).name}: {e}")
+            self.sound.play("grab")
+            return
+        except Exception as e:
+            self.pack_status.set_text(f"Couldn't import {Path(path).name}: {e}")
+            return
+        info = packs.read(slug) or {}
+        self.switch_pet(slug)
+        by = f" by {info['author']}" if info.get("author") else ""
+        self.pack_status.set_text(f"Added {info.get('name', slug)}{by} to your pets")
+        self.sound.play("on")
 
     def box_page(self):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin_end=12)
@@ -845,6 +1084,23 @@ class Settings(Gtk.Window):
         c.pack_start(row, False, False, 0)
         page.pack_start(c, False, False, 0)
 
+        c = self.card("Music", "When something's playing (Spotify, mpv, a browser tab... anything playerctl "
+                               "sees), your pet dances. A new move every few bars, with breathers in between")
+        self.dance_switches = {}
+        for key, title, sub in (
+            ("enabled", "Dances to music", None),
+            ("beat", "Dance in time", "Listens with cava to find the beat" if music.have_cava()
+             else "Install cava to dance in time with the song; without it, a steady 120 BPM"),
+            ("notes", "Music notes", "Little notes float up off it on the beat"),
+        ):
+            sw = Gtk.Switch(active=self.cfg["dance"][key], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+            sw.connect("notify::active", self.on_dance, key)
+            if key == "beat" and not music.have_cava():
+                sw.set_sensitive(False)
+            c.pack_start(self.setting_row(title, sw, sub), False, False, 0)
+            self.dance_switches[key] = sw
+        page.pack_start(c, False, False, 0)
+
         c = self.card("Vehicles", "Now and then your pet hops on something and goes for a ride instead of "
                                   "walking. Picking it up ends the ride")
         self.ride_switch = Gtk.Switch(active=self.cfg["ride"]["enabled"], halign=Gtk.Align.END,
@@ -1107,16 +1363,21 @@ class Settings(Gtk.Window):
         c.pack_start(self.acc_controls, False, False, 0)
         page.pack_start(c, False, False, 0)
 
+        page.pack_start(self.seasonal_card(), False, False, 0)
+
         bare = icon_button("Take everything off", "edit-clear-all-symbolic")
         bare.connect("clicked", self.acc_clear)
         c = self.card("Wardrobe", "Click to put on or take off", bare)
         flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
                            min_children_per_line=4, max_children_per_line=8, column_spacing=10, row_spacing=10)
         self.wardrobe = {}
+        self.wardrobe_flow = flow
         for acc_id, (title, *_rest) in accessories.PREMADE.items():
             t = self.acc_tile(acc_id, title)
             flow.add(t)
             self.wardrobe[acc_id] = t
+        for acc_id in accessories.owned_seasonal():
+            self.add_to_wardrobe(acc_id)
         c.pack_start(flow, False, False, 0)
         page.pack_start(c, False, False, 0)
 
@@ -1151,6 +1412,152 @@ class Settings(Gtk.Window):
         t.add(inner)
         t.connect("toggled", lambda b: self.acc_wear(acc_id, b.get_active()))
         return t
+
+    def add_to_wardrobe(self, acc_id, hook=False):
+        t = self.acc_tile(acc_id, accessories.title(acc_id))
+        if hook:
+            self.hook_sounds(t)
+        self.wardrobe_flow.add(t)
+        self.wardrobe[acc_id] = t
+        t.show_all()
+
+    # ── seasonal ────────────────────────────────────────────────────────────
+    def seasonal_card(self):
+        c = self.card("Seasonal", " ")
+        self.season_sub = c.get_children()[0].get_children()[-1]
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                           min_children_per_line=4, max_children_per_line=8, column_spacing=10, row_spacing=10)
+        self.season_tiles = {}
+        self.claim_fx = {}                 # acc_id -> when it was claimed (the sparkle burst)
+        for acc_id in accessories.SEASONAL:
+            t = css_class(Gtk.Button(), "tile")
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            pic = Gtk.DrawingArea()
+            pic.set_size_request(84, 62)
+            pic.connect("draw", lambda w, cr, a=acc_id: self.draw_season_tile(cr, w.get_allocated_width(),
+                                                                              w.get_allocated_height(), a))
+            inner.pack_start(pic, False, False, 0)
+            name = label(accessories.title(acc_id), "tile-label", xalign=0.5)
+            name.set_ellipsize(3)
+            name.set_max_width_chars(12)
+            inner.pack_start(name, False, False, 0)
+            status = css_class(label("", "season-status", xalign=0.5), "season-status")
+            status.set_halign(Gtk.Align.CENTER)
+            inner.pack_start(status, False, False, 0)
+            t.add(inner)
+            t.pic, t.status, t.no_snd = pic, status, True    # plays its own sounds
+            t.connect("clicked", lambda b, a=acc_id: self.on_season_tile(a))
+            flow.add(t)
+            self.season_tiles[acc_id] = t
+        c.pack_start(flow, False, False, 0)
+        self.update_seasonal()
+        GLib.timeout_add_seconds(600, lambda: self.update_seasonal() or True)   # the date can roll over
+        return c
+
+    @staticmethod
+    def short_date(d):
+        return f"{d:%b} {d.day}"
+
+    def update_seasonal(self):
+        A = accessories
+        live = [k for k in A.SEASONS if A.in_season(k)]
+        open_now = [k for k in A.SEASONAL if A.claimable(k)]
+        if open_now:
+            season = A.SEASONAL[open_now[0]][4]
+            sub = (f"{A.SEASONS[season][0]} is here! Claim these before {self.short_date(A.season_ends(season))} "
+                   "and they're yours to keep, even after the season's over")
+        else:
+            nxt = min(A.SEASONS, key=lambda k: A.season_starts(k))
+            when = A.season_starts(nxt)
+            sub = ("Holiday accessories show up here around their holiday. Claim them while they're around "
+                   f"and they stay in your wardrobe for good. Next up: {A.SEASONS[nxt][0]} on {self.short_date(when)}")
+            if live:
+                sub = f"You've claimed everything for {A.SEASONS[live[0]][0]}. " + sub.split(". ", 1)[1]
+        self.season_sub.set_text(sub)
+        for acc_id, t in self.season_tiles.items():
+            ctx, st = t.get_style_context(), t.status.get_style_context()
+            for cls in ("claim", "owned", "locked"):
+                ctx.remove_class(cls)
+                st.remove_class(cls)
+            if A.claimed(acc_id):
+                state, text = "owned", "Yours"
+            elif acc_id in open_now:
+                state, text = "claim", "Claim"
+            else:
+                state = "locked"
+                text = "Back " + self.short_date(A.season_starts(A.SEASONAL[acc_id][4]))
+            ctx.add_class(state)
+            st.add_class(state)
+            t.status.set_text(text)
+            t.state = state
+            t.set_tooltip_text({"claim": "Click to keep it forever",
+                                "owned": "Click to put it on or take it off",
+                                "locked": f"Only claimable around {A.SEASONS[A.SEASONAL[acc_id][4]][0]}"}[state])
+            t.pic.queue_draw()
+        if hasattr(self, "claim_dot"):
+            self.claim_dot.set_visible(bool(open_now))
+
+    def on_season_tile(self, acc_id):
+        t = self.season_tiles[acc_id]
+        if t.state == "owned":
+            self.sound.play("click")
+            w = self.wardrobe.get(acc_id)
+            if w:
+                w.set_active(not w.get_active())
+            return
+        if t.state != "claim" or not accessories.claim(acc_id):
+            self.sound.play("grab")
+            return
+        self.sound.play("on")
+        self.claim_fx[acc_id] = time.monotonic()
+        GLib.timeout_add(16, self.tick_claim, acc_id)
+        self.add_to_wardrobe(acc_id, hook=True)
+        self.update_seasonal()
+        self.wardrobe[acc_id].set_active(True)          # try it on straight away
+
+    def tick_claim(self, acc_id):
+        self.season_tiles[acc_id].pic.queue_draw()
+        if time.monotonic() - self.claim_fx.get(acc_id, 0) > 1.0:
+            self.claim_fx.pop(acc_id, None)
+            return False
+        return True
+
+    def draw_season_tile(self, cr, w, h, acc_id):
+        c = self.pet.colors
+        state = getattr(self.season_tiles.get(acc_id), "state", "locked")
+        rounded(cr, 0, 0, w, h, 14)
+        cr.clip()
+        cr.set_source_rgba(*c["fg"], 0.05)
+        cr.paint()
+        a = accessories.aspect(acc_id)
+        k = min(w - 18, (h - 14) / a)
+        age = time.monotonic() - self.claim_fx[acc_id] if acc_id in self.claim_fx else None
+        pop = 1 + 0.25 * math.sin(math.pi * min(1, age / 0.35)) if age is not None else 1
+        cr.save()
+        cr.translate(w / 2, h / 2)
+        cr.scale(k * pop, k * pop)
+        if state == "locked":            # a mystery silhouette until its season
+            cr.push_group()
+            accessories.paint(cr, acc_id)
+            pat = cr.pop_group()
+            cr.set_source_rgba(*c["fg"], 0.22)
+            cr.mask(pat)
+        else:
+            accessories.paint(cr, acc_id)
+        cr.restore()
+        if age is not None:              # a burst of little stars
+            for i in range(10):
+                ang = i * 2 * math.pi / 10 + 0.3
+                d = (0.15 + 0.85 * min(1, age / 0.6)) * min(w, h) * 0.5
+                r = 5 * (1 - min(1, age))
+                x, y = w / 2 + d * math.cos(ang), h / 2 + d * math.sin(ang) * 0.8
+                for j in range(10):
+                    rr = r if j % 2 == 0 else r * 0.45
+                    an = -math.pi / 2 + j * math.pi / 5
+                    (cr.move_to if j == 0 else cr.line_to)(x + rr * math.cos(an), y + rr * math.sin(an))
+                cr.close_path()
+                cr.set_source_rgba(1, 0.8, 0.3, 1 - min(1, age))
+                cr.fill()
 
     def fill_custom(self):
         for child in self.custom_flow.get_children():
@@ -1368,6 +1775,12 @@ class Settings(Gtk.Window):
         window.larry .tile:hover {{ background: {tonal}; }}
         window.larry .tile:checked {{ background: {tonal_hi}; box-shadow: inset 0 0 0 2px {acc2}; }}
         .tile-label {{ font-size: 12.5px; font-weight: 700; }}
+        .season-status {{ font-size: 11px; font-weight: 800; border-radius: 999px; padding: 1px 10px; }}
+        .season-status.claim {{ background: {acc2}; color: {on_acc}; }}
+        .season-status.owned {{ color: {acc2}; }}
+        .season-status.locked {{ color: {muted}; }}
+        window.larry .tile.claim {{ box-shadow: inset 0 0 0 2px {acc2}; }}
+        window.larry .claim-dot {{ min-width: 8px; min-height: 8px; border-radius: 999px; background: {acc2}; }}
         window.larry .tile-x {{ padding: 2px; margin: 4px; min-width: 20px; min-height: 20px; border-radius: 999px;
             background: alpha({bg0}, 0.85); opacity: 0.75; }}
         window.larry .tile-x:hover {{ opacity: 1; background: #e0455a; }}
@@ -1418,6 +1831,8 @@ class Settings(Gtk.Window):
     def hook_sounds(self, widget):
         """Give every control its sound (skipped while the window is changing things itself), and
         stop sliders/dropdowns from eating the scroll wheel."""
+        if getattr(widget, "no_snd", False):
+            return
         if isinstance(widget, (Gtk.Scale, Gtk.ComboBox, Gtk.SpinButton)):
             widget.connect("scroll-event", self.pass_scroll)
         if isinstance(widget, Gtk.Scale):
@@ -1588,6 +2003,8 @@ class Settings(Gtk.Window):
         self.game_switch.set_active(cfg["game"])
         self.chat_switch.set_active(cfg["chat"]["typing"])
         self.ride_switch.set_active(cfg["ride"]["enabled"])
+        for key, sw in self.dance_switches.items():
+            sw.set_active(cfg["dance"][key])
         self.ride_buttons[cfg["ride"]["vehicle"]].set_active(True)
         self.ride_every.set_value(cfg["ride"]["every"])
         self.chat_every.set_value(cfg["chat"]["every"])
@@ -1620,6 +2037,15 @@ class Settings(Gtk.Window):
     def apply(self):
         if self.syncing:
             return
+        try:
+            self.cfg, moved = packs.sync(self.cfg)      # the pet you're using saves itself
+        except Exception as e:
+            print(f"larry: can't save the pet: {e}", file=sys.stderr)
+            moved = False
+        if moved:
+            was, self.syncing = self.syncing, True
+            self.chooser.set_filename(self.cfg["image"])
+            self.syncing = was
         config.save(self.cfg)
         self.pet.set_config(copy.deepcopy(self.cfg))
         self.refresh()
@@ -1735,6 +2161,11 @@ class Settings(Gtk.Window):
     def on_behavior(self, sw, _p, key):
         if not self.syncing and self.cfg["behavior"][key] != sw.get_active():
             self.cfg["behavior"][key] = sw.get_active()
+            self.apply()
+
+    def on_dance(self, sw, _p, key):
+        if not self.syncing and self.cfg["dance"][key] != sw.get_active():
+            self.cfg["dance"][key] = sw.get_active()
             self.apply()
 
     def on_ride_switch(self, sw, _p):

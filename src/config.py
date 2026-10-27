@@ -18,6 +18,7 @@ FILE = DIR / "config.toml"
 
 DEFAULTS = {
     "name": "Larry",                   # your pet's name (shown in the settings window)
+    "pet": "",                         # which of your saved pets this is (~/.config/larry/pets/<id>/)
     "theme": themes.DEFAULT,           # colours of the box and settings: dark | desktop | light | gruvbox | ...
     "image": str(HERE / "larry.png"),  # any PNG/JPG/WebP; transparent PNGs look best
     "size": 44,                        # sprite height in px
@@ -54,6 +55,11 @@ DEFAULTS = {
         "vehicle": "motorcycle",       # motorcycle | car | helicopter | bike | random
         "every": 3,                    # minutes between rides, roughly
     },
+    "dance": {
+        "enabled": True,               # dances while music is playing (any MPRIS player)
+        "beat": True,                  # listen with cava to dance in time (if cava is installed)
+        "notes": True,                 # music notes float up while it dances
+    },
     "game": True,                      # catch game: throw the pet up, catch it on the way down
     "pet_sounds": False,               # moo/"weee!" when thrown, a blip when caught (off: could get annoying)
     "sounds": True,                    # clicks and ticks in the settings window
@@ -81,6 +87,7 @@ RIDE_MIN, RIDE_MAX = 1, 30
 
 COMMENTS = {
     "name": "your pet's name",
+    "pet": "which saved pet this is: a folder in ~/.config/larry/pets/ (changes to the pet are saved there too)",
     "match_theme": "tint the built-in skies (day, sunset, night) to the colour theme",
     "theme": "colours: " + " | ".join(themes.THEMES) + " (desktop follows rice / your GTK theme)",
     "image": "picture to use (path); delete the line to go back to Larry",
@@ -102,6 +109,9 @@ COMMENTS = {
     "ride.enabled": "now and then the pet hops on a vehicle instead of walking",
     "ride.vehicle": "which one: " + " | ".join(vehicles.KINDS) + " | random",
     "ride.every": f"minutes between rides, roughly ({RIDE_MIN}-{RIDE_MAX})",
+    "dance.enabled": "dance while music is playing (Spotify, mpv, a browser... anything that shows up in playerctl)",
+    "dance.beat": "listen with cava to dance in time with the song (needs cava; otherwise a steady 120 BPM)",
+    "dance.notes": "music notes float up while it dances",
     "game": "catch game: throw the pet up and catch it on the way down (+1, in a row); best in the box",
     "pet_sounds": "the pet's own sounds: a moo (Larry) or weee when thrown, a blip when caught (off by default)",
     "packages": "react when apt, pacman, an AUR helper, emerge, dnf, zypper, flatpak... finishes",
@@ -125,12 +135,17 @@ CHOICES = {"colors": [k for k, _ in scene.COLOR_MODES]}
 
 
 def load():
-    cfg = copy.deepcopy(DEFAULTS)
     try:
         with open(FILE, "rb") as f:
             user = tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError):
         user = {}
+    return parse(user)
+
+
+def parse(user):
+    """Settings as read from the file (or any dict shaped like it), checked and filled in."""
+    cfg = copy.deepcopy(DEFAULTS)
     for key, default in DEFAULTS.items():
         if not isinstance(default, dict) and isinstance(user.get(key), type(default)):
             cfg[key] = user[key]
@@ -191,6 +206,11 @@ def load():
     v = uride.get("every")
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         cfg["ride"]["every"] = max(RIDE_MIN, min(RIDE_MAX, round(v)))
+
+    udance = user.get("dance") if isinstance(user.get("dance"), dict) else {}
+    for key in ("enabled", "beat", "notes"):
+        if isinstance(udance.get(key), bool):
+            cfg["dance"][key] = udance[key]
 
     ureact = user.get("reactions") if isinstance(user.get("reactions"), dict) else {}
     for key in ("packages", "downloads", "bubble"):

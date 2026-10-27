@@ -28,6 +28,19 @@ customisable from a settings window: the box's scene, the pet's accessories, and
   chef hat, grad cap, viking helmet, halo, devil horns, sunglasses, nerd glasses, bow tie, bow,
   flower) plus your own pictures. Fit them in the fitting room: drag, resize and rotate until
   they sit right on your pet. They lean, bob and flip with it.
+- **My pets and pet packs.** Keep several pets and switch between them on the My pets page; each
+  remembers its picture, name, size, accessories and animation, and saves itself as you change it.
+  Export one as a single `.larrypet` file to share, and import other people's (pick the file, or drop
+  it on the settings window). Imports are checked: only the expected files are read, sizes are
+  capped and every picture is re-encoded.
+- **Dances to music.** When anything's playing (Spotify, mpv, a browser tab: whatever shows up in
+  `playerctl`), your pet dances: bops, sways, spins, kicks, headbangs and bounces, a new move every
+  couple of bars, with music notes floating up. With cava installed it listens and dances in time
+  with the song; without it, a steady 120 BPM.
+- **Seasonal accessories.** Around holidays, limited ones show up to claim: a pumpkin and witch hat
+  for Halloween, a Santa hat and antlers for Christmas, star glasses for New Year, heart boppers
+  for Valentine's, a lucky hat for St. Patrick's and bunny ears in spring. Your pet tells you when
+  there's something new. Claim it while the season's on and it stays in your wardrobe for good.
 - **Animation you shape with graphs.** Walk speed, step length, tilt, bob, squash, wandering,
   gravity, throwing and bounciness, plus curves you drag to shape each step and the box opening.
   Five presets built in; save your own and switch between them.
@@ -90,6 +103,7 @@ customisable from a settings window: the box's scene, the pet's accessories, and
 - Python 3.11+ with PyGObject, pycairo and Pillow
 - GTK 3 and **gtk-layer-shell with GObject introspection**
 - Optional: GStreamer with `pulsesink` for the settings sounds (it works silently without them)
+- Optional: `cava`, so the pet dances in time with your music (otherwise it dances at a steady 120 BPM)
 
 | Distro | Packages |
 |---|---|
@@ -170,6 +184,8 @@ autostart.
 | `~/.config/larry/config.toml` | all settings; the settings window writes it, but it's readable and hand-editable |
 | `~/.config/larry/animations/` | your saved animation presets |
 | `~/.config/larry/{accessories,decorations,grounds,skies}/` | copies of pictures you added |
+| `~/.config/larry/claimed.json` | seasonal accessories you've claimed |
+| `~/.config/larry/pets/` | your saved pets, one folder each |
 | `~/.local/state/larry/game.json` | your catch-game best |
 | `~/.cache/larry/` | rendered sprites and sounds (safe to delete) |
 
@@ -195,7 +211,9 @@ src/larry.py         the pet: overlay window, physics, Hyprland IPC
 src/settings.py      the settings window
 src/scene.py         the box: sky, ground, decorations
 src/scene_editor.py  drag-and-drop scene editor
-src/accessories.py   built-in accessories + placement
+src/accessories.py   built-in + seasonal accessories, placement, claims
+src/music.py         is music playing (MPRIS) + beat tracking (cava)
+src/packs.py         saved pets + .larrypet import/export
 src/fitting_room.py  drag-and-drop accessory editor
 src/anim.py          animation parameters, curves and presets
 src/curve_editor.py  the graph editor

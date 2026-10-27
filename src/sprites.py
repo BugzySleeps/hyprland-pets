@@ -343,28 +343,30 @@ def fall_source(cfg):
 
 
 def load_fall(cfg, scale=1):
-    """[facing right, facing left] surfaces for the falling pose, or None. Accessories aren't
-    drawn on it: they're fitted to the standing picture and wouldn't line up."""
+    """[facing right, facing left] surfaces for the falling pose, or None. Larry's own pose wears
+    his accessories; your own falling picture doesn't (they wouldn't line up)."""
     src = fall_source(cfg)
     if not src:
         return None
     sub = {"image": str(src), "faces_left": False, "remove_bg": not has_transparency(src)}
     k = LARRY_FALL_SCALE if src == LARRY_FALLING else 1
     basep = base(sub, round((cfg["size"] - 2 * PAD) * k * scale))
-    sig = f"{basep.name}|{cfg['outline']}|fall"
+    items = cfg.get("accessories", {}) if src == LARRY_FALLING else {}
+    meta_path = LARRY_FALLING.with_suffix(".json")
+    if items and not meta_path.is_file():
+        items = {}
+    sig = f"{basep.name}|{cfg['outline']}|fall" + ("|acc-" + acc_tag(items) if items else "")
     key = hashlib.sha1(sig.encode()).hexdigest()[:16]
     out = CACHE / f"{key}-fall-right.png", CACHE / f"{key}-fall-left.png"
     if not all(p.exists() for p in out):
         pet = Image.open(basep).convert("RGBA")
+        if items:
+            decorate, _grow = wearing(items, json.loads(meta_path.read_text())["pet_box"], pet.width, pet.height)
+            pet = decorate(pet)
         pad = round(PAD * scale)
         sprite = Image.new("RGBA", (pet.width + 2 * pad, pet.height + 2 * pad), (255, 255, 255, 0))
         sprite.alpha_composite(pet, (pad, pad))
-        if cfg["outline"]:
-            halo = sprite.getchannel("A").filter(ImageFilter.MaxFilter(5))
-            sticker = Image.new("RGBA", sprite.size, (255, 255, 255, 0))
-            sticker.putalpha(halo)
-            sticker.alpha_composite(sprite)
-            sprite = sticker
+        sprite = sticker(sprite, cfg)
         sprite.save(out[0])
         sprite.transpose(Image.FLIP_LEFT_RIGHT).save(out[1])
     surfaces = [cairo.ImageSurface.create_from_png(str(p)) for p in out]
@@ -372,6 +374,52 @@ def load_fall(cfg, scale=1):
         for surf in surfaces:
             surf.set_device_scale(scale, scale)
     return surfaces
+
+
+def wearing(items, pet_box, fw, fh, centred=True):
+    """Put the accessories (fitted to the standing picture) on one of Larry's drawn poses, whose
+    head is copied from that picture: pet_box says where the standing picture's box lands, as
+    fractions of the fw x fh frame. Returns (decorate(frame) -> bigger frame, (gl, gt, gr) growth).
+    centred grows both sides evenly, for poses drawn centred on him (so he doesn't shift)."""
+    bx0, by0, bx1, by1 = pet_box
+    px, py = bx0 * fw, by0 * fh
+    pw, ph = (bx1 - bx0) * fw, (by1 - by0) * fh
+    left, top, right = accessories.extent(items, pw, ph)
+    gl = math.ceil(max(0, -(px + left)))
+    gt = math.ceil(max(0, -(py + top)))
+    gr = math.ceil(max(0, px + right - fw))
+    if centred:
+        gl = gr = max(gl, gr)
+
+    def decorate(frame):
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, frame.width + gl + gr, frame.height + gt)
+        cr = cairo.Context(surf)
+        cr.translate(gl + px, gt + py)
+        accessories.draw(cr, items, pw, ph, behind=True)
+        cr.identity_matrix()
+        cr.set_source_surface(to_surface(frame), gl, gt)
+        cr.paint()
+        cr.translate(gl + px, gt + py)
+        accessories.draw(cr, items, pw, ph, behind=False)
+        return to_pil(surf)
+    return decorate, (gl, gt, gr)
+
+
+def acc_tag(items):
+    return hashlib.sha1(accessories.signature(items).encode()).hexdigest()[:10]
+
+
+def sheet_wearing(cfg, sheet, scale, centred=True):
+    """(decorate, growth, frame w, frame h, tag suffix) to put the accessories on a drawn sheet, or
+    None when there's nothing to wear (or the sheet doesn't say where his head is)."""
+    items = cfg.get("accessories", {})
+    meta = json.loads(sheet.with_suffix(".json").read_text())
+    if not items or "pet_box" not in meta:
+        return None
+    fh = round((cfg["size"] - 2 * PAD) * meta["scale"] * scale)
+    fw = max(1, round(meta["frame_w"] * fh / meta["frame_h"]))
+    decorate, grow = wearing(items, meta["pet_box"], fw, fh, centred)
+    return decorate, grow, fw, fh, "-acc-" + acc_tag(items)
 
 
 def load_sheet(cfg, sheet, tag, scale=1, decorate=None):
@@ -412,6 +460,9 @@ def load_held(cfg, scale=1):
     """Larry waddling all four legs while you hold him (upright, with the falling pose on), or None."""
     if fall_source(cfg) != LARRY_FALLING or not LARRY_HELD.is_file():
         return None
+    w = sheet_wearing(cfg, LARRY_HELD, scale)
+    if w:
+        return load_sheet(cfg, LARRY_HELD, "held-2" + w[4], scale, w[0])
     return load_sheet(cfg, LARRY_HELD, "held-2", scale)
 
 
@@ -419,6 +470,9 @@ def load_typing(cfg, scale=1):
     """Larry sitting on his butt typing on a mini keyboard, or None (other pets get a drawn keyboard)."""
     if not is_larry(cfg) or not LARRY_TYPING.is_file():
         return None
+    w = sheet_wearing(cfg, LARRY_TYPING, scale)
+    if w:
+        return load_sheet(cfg, LARRY_TYPING, "typing-1" + w[4], scale, w[0])
     return load_sheet(cfg, LARRY_TYPING, "typing-1", scale)
 
 
@@ -428,40 +482,17 @@ def load_riding(cfg, scale=1):
     if not is_larry(cfg) or not LARRY_RIDING.is_file():
         return None
     meta = json.loads(LARRY_RIDING.with_suffix(".json").read_text())
-    items = cfg.get("accessories", {})
-    if not items or "pet_box" not in meta:
+    w = sheet_wearing(cfg, LARRY_RIDING, scale, centred=False)   # placed by his seat, not centred
+    if not w:
         return load_sheet(cfg, LARRY_RIDING, "riding-1", scale), meta
-    # his accessories, fitted to the standing picture, go on the same head here: the frame grows
-    # for whatever sticks out, and the seat / pedal points move with it
-    height = round((cfg["size"] - 2 * PAD) * meta["scale"] * scale)
-    fw = max(1, round(meta["frame_w"] * height / meta["frame_h"]))
-    bx0, by0, bx1, by1 = meta["pet_box"]
-    px, py = bx0 * fw, by0 * height
-    pw, ph = (bx1 - bx0) * fw, (by1 - by0) * height
-    left, top, right = accessories.extent(items, pw, ph)
-    gl = math.ceil(max(0, -(px + left)))
-    gt = math.ceil(max(0, -(py + top)))
-    gr = math.ceil(max(0, px + right - fw))
-
-    def decorate(frame):
-        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, frame.width + gl + gr, frame.height + gt)
-        cr = cairo.Context(surf)
-        cr.translate(gl + px, gt + py)
-        accessories.draw(cr, items, pw, ph, behind=True)
-        cr.identity_matrix()
-        cr.set_source_surface(to_surface(frame), gl, gt)
-        cr.paint()
-        cr.translate(gl + px, gt + py)
-        accessories.draw(cr, items, pw, ph, behind=False)
-        return to_pil(surf)
-
+    # the frame grows for whatever sticks out, and the seat / pedal points move with it
+    decorate, (gl, gt, gr), fw, height, tag = w
     W, H = fw + gl + gr, height + gt
     meta = {**meta,
             "seat": [(meta["seat"][0] * fw + gl) / W, (meta["seat"][1] * height + gt) / H],
             "crank": [(meta["crank"][0] * fw + gl) / W, (meta["crank"][1] * height + gt) / H],
             "pedal": meta["pedal"] * height / H}
-    tag = "riding-acc-" + hashlib.sha1(accessories.signature(items).encode()).hexdigest()[:10]
-    return load_sheet(cfg, LARRY_RIDING, tag, scale, decorate), meta
+    return load_sheet(cfg, LARRY_RIDING, "riding" + tag, scale, decorate), meta
 
 
 def draw_centered(cr, sprite, cx, cy, tilt):

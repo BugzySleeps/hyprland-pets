@@ -33,9 +33,11 @@ from gi.repository import Gdk, GLib, Gtk, GtkLayerShell  # noqa: E402
 import fonts  # noqa: E402
 fonts.register()    # before any window: the settings window's font
 import config  # noqa: E402
+import accessories  # noqa: E402
 import anim  # noqa: E402
 import scene  # noqa: E402
 import sounds  # noqa: E402
+import music  # noqa: E402
 import termchat  # noqa: E402
 import themes  # noqa: E402
 import vehicles  # noqa: E402
@@ -176,7 +178,7 @@ class Larry(Gtk.Window):
         self.clients = {}         # address -> Hyprland client, from the last refresh
         self.mon = None           # the monitor we're drawn on
         self.mon_t = 0.0
-        self.act = None           # idle behaviour: None | "sit" | "sleep"
+        self.act = None           # idle behaviour: None | "sit" | "sleep" | "type" | "dance"
         self.act_until = 0.0
         self.watching = False     # looking at the cursor
         self.cursor = None        # pointer position (ours, not just over our window), from Hyprland
@@ -198,6 +200,13 @@ class Larry(Gtk.Window):
         self.toss = None          # {"from": y thrown at, "peak": highest y} while a throw is in the air
         self.popups = []          # floating "+1" / "New best!" texts: {"text", "x", "y", "start", "big"}
         self.watcher.configure(self.cfg["reactions"]["packages"], self.cfg["reactions"]["downloads"])
+        self.music = music.Music()
+        self.music.configure(self.cfg["dance"]["enabled"], self.cfg["dance"]["beat"])
+        self.dance_until = 0.0     # a dance lasts a while, then he takes a breather
+        self.next_dance = 0.0
+        self.dance_moves = []      # the moves for this dance, one per 8 beats
+        self.notes = []            # floating music notes: {"x" (across him), "start", "drift", "kind"}
+        self.last_note_beat = 0
         self.room = None          # address of the terminal he lives in (dragged into it), or None
         self.room_rect = None     # its inside: (left, top, right, bottom) on screen
         self.room_shown = True    # False while that terminal is on a workspace you're not looking at
@@ -216,6 +225,7 @@ class Larry(Gtk.Window):
 
         self.listen_events()
         GLib.timeout_add_seconds(2, self.check_theme)
+        GLib.timeout_add_seconds(20, self.check_season)
         self.show_all()
         self.check_fullscreen()
         self.wake()
@@ -693,6 +703,7 @@ class Larry(Gtk.Window):
     def set_config(self, cfg):
         """Swap in new settings live (called by the settings window)."""
         self.watcher.configure(cfg["reactions"]["packages"], cfg["reactions"]["downloads"])
+        self.music.configure(cfg["dance"]["enabled"], cfg["dance"]["beat"])
         theme_changed = cfg["theme"] != self.cfg["theme"]
         if cfg["ride"] != self.cfg["ride"]:
             if not cfg["ride"]["enabled"]:
@@ -700,7 +711,7 @@ class Larry(Gtk.Window):
             self.next_ride = time.monotonic() + cfg["ride"]["every"] * 60 * random.uniform(0.6, 1.4)
         self.anim = anim.Compiled(cfg["animation"])
         sprite_keys = ("image", "size", "faces_left", "remove_bg", "outline", "accessories")
-        if any(cfg[k] != self.cfg[k] for k in ("image", "size", "outline", "fall_image")):
+        if any(cfg[k] != self.cfg[k] for k in ("image", "size", "outline", "fall_image", "accessories")):
             self.fall_sprites = self.load_fall(cfg)
             self.held_sprites = self.load_held(cfg)
         if any(cfg[k] != self.cfg[k] for k in sprite_keys):
@@ -800,6 +811,8 @@ class Larry(Gtk.Window):
             pad += max(0, math.hypot(fw, fh) - min(self.lw, self.lh) / 2)
         if self.act == "sleep":   # the z's float up above him
             pad += self.lh
+        if self.act == "dance" or self.notes:   # hops, and the notes floating up
+            pad += self.lh * 1.3
         if self.act == "type" and self.typing_sprites:   # sitting up typing: taller
             pad += sprites.logical_size(self.typing_sprites[0][0])[1]
         if self.reaction:         # hops, hearts and the speech bubble
@@ -1245,6 +1258,14 @@ class Larry(Gtk.Window):
             self.peek(self.REACT_TIME + 0.3)   # pop the box open so you can see
         self.wake()
 
+    def check_season(self):
+        """Once per holiday: tell you there's something new to claim in the wardrobe."""
+        season = accessories.new_season()
+        if season:
+            self.on_finished("season", True, f"New {accessories.SEASONS[season][0]} stuff to claim!")
+        GLib.timeout_add_seconds(1800, self.check_season)
+        return False
+
     WATCH_R, WAKE_R = 260, 110   # px: cursor this close gets watched / wakes him up
 
     def poll_cursor(self, now):
@@ -1283,6 +1304,18 @@ class Larry(Gtk.Window):
             elif not self.typist.step(now):            # done: back to sleep
                 self.typist, self.act, self.last_chat = None, "sleep", now
             return
+        if self.act == "dance":
+            if not self.music.playing or now > self.dance_until:
+                self.act, self.pause = None, 0.8
+                self.next_dance = now + (random.uniform(8, 20) if self.music.playing else 0)
+                self.damage_larry()
+                self.notes = []
+            else:
+                self.dance_turns(now)
+            return
+        if self.music.playing and now >= self.next_dance and not (self.reaction or self.typist):
+            self.start_dance(now)
+            return
         if self.act == "sleep":
             if not b["sleep"] or (recent and dist < self.WAKE_R):
                 self.act, self.pause = None, 1.2       # wake up, stand there a moment
@@ -1303,6 +1336,113 @@ class Larry(Gtk.Window):
                                                                            or self.reaction or self.pause > 0)):
             if not self.start_ride():
                 self.next_ride = now + 20      # no room here: try again in a bit
+
+    # ── dancing ─────────────────────────────────────────────────────────────
+    DANCE_MOVES = ("bop", "sway", "spin", "kick", "headbang", "bounce")
+
+    def start_dance(self, now):
+        self.act, self.watching, self.pause = "dance", False, 0
+        self.dance_until = now + random.uniform(25, 60)
+        moves = [m for m in self.DANCE_MOVES if m != "kick" or "dangle0" in self.poses]
+        random.shuffle(moves)
+        self.dance_moves = moves
+        self.last_note_beat = int(self.music.now_beats())
+        self.damage_larry()
+
+    def dance_move(self, beats):
+        """Which move he's doing on this beat (a new one every 8 beats)."""
+        return self.dance_moves[int(beats // 8) % len(self.dance_moves)] if self.dance_moves else "bop"
+
+    def dance_turns(self, now):
+        """Spinning flips him round every other beat; music notes pop out on the beat."""
+        beats = self.music.now_beats(now)
+        if self.dance_move(beats) == "spin":
+            self.dir = 1 if int(beats // 2) % 2 == 0 else -1
+        if self.cfg["dance"]["notes"] and int(beats) > self.last_note_beat:
+            self.last_note_beat = int(beats)
+            if int(beats) % 2 == 0:
+                self.notes.append({"x": random.uniform(0.15, 0.85), "start": now,
+                                   "drift": random.uniform(-1, 1), "kind": random.randrange(2)})
+        self.notes = [n for n in self.notes if now - n["start"] < self.NOTE_TIME]
+
+    NOTE_TIME = 1.8
+
+    def dance_pose(self, t):
+        """(tilt, bob, squash, legs frame or None) for this moment of the dance."""
+        beats = self.music.now_beats(t)
+        f = beats % 1                       # 0 on the beat
+        k = self.music.strength()
+        hop = math.sin(math.pi * f)         # up between beats, down on them
+        hit = (1 - f) ** 3                  # a squash right on the beat
+        move = self.dance_move(beats)
+        if move == "bop":
+            return 0, self.lh * 0.09 * k * hop, 0.1 * k * hit - 0.04 * k * hop, None
+        if move == "sway":
+            return 0.2 * k * math.cos(math.pi * beats), self.lh * 0.03 * hop, 0.04 * k * hit, None
+        if move == "spin":
+            return 0, self.lh * 0.16 * k * abs(math.sin(math.pi * beats / 2)), 0.08 * k * hit, None
+        if move == "kick":
+            n = sum(1 for p in self.poses if p.startswith("dangle"))
+            return 0, self.lh * 0.14 * k * hop, 0.06 * k * hit, int(f * n) % n
+        if move == "headbang":
+            return self.dir * 0.22 * k * hit, 0, 0.05 * k * hit, None
+        # bounce: big hops on every other beat, a little one between
+        big = int(beats) % 2 == 0
+        return (0.08 * k * hop * (1 if big else -1), self.lh * (0.24 if big else 0.07) * k * hop,
+                (0.14 if big else 0.06) * k * hit - 0.05 * k * hop, None)
+
+    def draw_notes(self, cr, x, y, t):
+        """Music notes floating up off him."""
+        c = self.colors
+        for n in self.notes:
+            p = (t - n["start"]) / self.NOTE_TIME
+            if not 0 <= p < 1:
+                continue
+            a = min(1, p * 5) * (1 - p) ** 0.7
+            nx = x + self.lw * n["x"] + n["drift"] * self.lh * 0.35 * p + math.sin(p * 9 + n["drift"]) * 3
+            ny = y - p * self.lh * 0.9
+            s = self.lh * 0.2 * (0.7 + 0.5 * min(1, p * 4))
+            cr.save()
+            cr.translate(nx, ny)
+            cr.rotate(math.sin(p * 7 + n["drift"]) * 0.25)
+            cr.scale(s, s)
+            self.note_path(cr, n["kind"])
+            cr.set_source_rgba(0.06, 0.06, 0.07, a)
+            cr.set_line_width(0.22)
+            cr.set_line_join(cairo.LINE_JOIN_ROUND)
+            cr.stroke_preserve()
+            cr.set_source_rgba(*c["accent2"], a)
+            cr.fill()
+            cr.restore()
+
+    @staticmethod
+    def note_path(cr, kind):
+        """A ♪ (kind 0) or a ♫ (kind 1) in a 1-unit box, as one fillable shape."""
+        def head(cx, cy):
+            cr.save()
+            cr.translate(cx, cy)
+            cr.rotate(-0.4)
+            cr.scale(0.2, 0.14)
+            cr.new_sub_path()
+            cr.arc(0, 0, 1, 0, 2 * math.pi)
+            cr.restore()
+        if kind == 0:
+            head(-0.12, 0.38)
+            cr.rectangle(0.0, -0.5, 0.07, 0.86)
+            cr.move_to(0.0, -0.5)
+            cr.curve_to(0.15, -0.38, 0.35, -0.3, 0.3, -0.05)
+            cr.curve_to(0.25, -0.22, 0.12, -0.28, 0.0, -0.3)
+            cr.close_path()
+        else:
+            head(-0.3, 0.42)
+            head(0.26, 0.34)
+            cr.rectangle(-0.18, -0.38, 0.07, 0.78)
+            cr.rectangle(0.38, -0.46, 0.07, 0.78)
+            cr.move_to(-0.18, -0.38)
+            cr.line_to(0.45, -0.46)
+            cr.line_to(0.45, -0.3)
+            cr.line_to(-0.18, -0.22)
+            cr.close_path()
 
     MAX_CHATS = 3   # messages per nap: then he really sleeps
 
@@ -1570,6 +1710,14 @@ class Larry(Gtk.Window):
             sprites.draw_pet(cr, sprite, x + self.lw / 2, y + self.lh, tilt, bob, squash, extra)
             self.draw_reaction(cr, x, y - bob, age, r)
             return
+        if self.act == "dance":
+            tilt, bob, squash, legs = self.dance_pose(t)
+            if legs is not None:
+                sprite = self.poses[f"dangle{legs}"][side]
+            sprites.draw_pet(cr, sprite, x + self.lw / 2, y + self.lh, tilt, bob, squash)
+            if self.notes:
+                self.draw_notes(cr, x, y - bob * 0.3, t)
+            return
         if self.act == "type":
             if self.typing_sprites:      # Larry: on his butt, keyboard on his lap
                 sprite = self.typing_sprites[int(t * 9) % len(self.typing_sprites)][side]
@@ -1768,7 +1916,13 @@ def main():
     GLib.io_add_watch(sock.fileno(), GLib.IO_IN, on_cmd)
     if want_settings:
         pet.open_settings()
-    Gtk.main()
+    import signal
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: Gtk.main_quit() or False)
+    try:
+        Gtk.main()
+    finally:
+        pet.music.close()
 
 
 if __name__ == "__main__":
