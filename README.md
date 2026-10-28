@@ -82,6 +82,26 @@ customisable from a settings window: the box's scene, the pet's accessories, and
   weather there every half hour ([Open-Meteo](https://open-meteo.com): free, no account): an
   umbrella hat when it rains, a scarf when it snows or drops to 5°C, and rain or snow falling in
   the box (with lightning in a thunderstorm). "Try it" shows each outfit without waiting.
+- **Voice commands** (off by default). Say "Larry, come here" and he walks over to your cursor, or
+  say just "Larry", wait for him to perk up with a "?", then the command. Also: dance, sit down, go
+  to sleep, wake up, jump, go for a ride, go home, come out, moo, good boy, and there are lots of ways
+  to say each ("get over here", "boogie", "good night", "who's a good boy"...). Commands without his
+  name are ignored. With `wl-screenrec` installed he can also run a screen recorder: "Larry, start
+  recording" / "Larry, stop recording" records the monitor you're on, with desktop audio, into
+  ~/Videos/Recordings. He can tell you the time ("Larry, what time is it"), take a screenshot
+  ("Larry, screenshot" lets you drag an area, "Larry, screenshot everything" takes the whole monitor;
+  saved to ~/Pictures/Screenshots and copied to the clipboard, needs `grim` and `slurp`), and control
+  your music with `playerctl` ("Larry, pause the music", "play the music", "next song", "previous
+  song"). It's
+  recognised offline on your computer by [Vosk](https://alphacephei.com/vosk/) (a one-time ~45 MB
+  setup from Settings → Play → Voice, kept in its own folder), only listening for those phrases;
+  nothing is ever sent anywhere. Your pet also answers to its own name if it's one ordinary word.
+- **Hello and goodbye.** When you log in, your pet climbs out of its box, has a big stretch and says
+  good morning (or afternoon, or evening); if you've been away a few days it's extra excited to see you.
+  When you shut down or restart, it appears in the middle of the screen, waves goodbye and floats up and
+  away before the screen fades out (this one's off by default). It uses systemd-logind's shutdown delay
+  (at most 5 seconds), so it works however you shut down. Switch either in Settings → Idle behaviour; `hyprland-pets --goodbye`
+  (or "Try it") shows the goodbye without shutting anything down.
 - **Petting.** Hold the middle mouse button (the scroll wheel) on your pet and stroke it: hearts float
   up and it leans into your hand with happy eyes. Keep going and it flops over on its side, blissed
   out (with a little moo if pet sounds are on). It can be turned off under Play → Fun.
@@ -141,6 +161,9 @@ customisable from a settings window: the box's scene, the pet's accessories, and
 - GTK 3 and **gtk-layer-shell with GObject introspection**
 - Optional: GStreamer with `pulsesink` for the settings sounds (it works silently without them)
 - Optional: `cava`, so the pet dances in time with your music (otherwise it dances at a steady 120 BPM)
+- Optional: `wl-screenrec`, for the "start recording" voice command
+- Optional: `grim` and `slurp` (and `wl-copy`) for the "screenshot" voice command, `playerctl` for the
+  music ones
 
 | Distro | Packages |
 |---|---|
@@ -262,6 +285,9 @@ src/library.py       your own pictures
 src/sounds.py        synthesized UI sounds
 src/watch.py         notices package managers and downloads finishing
 src/termchat.py      the pet's messages in your terminal
+src/desktop.py       screenshots and music controls for the voice commands (grim, slurp, playerctl)
+src/recorder.py      screen recording for the voice commands (wl-screenrec)
+src/voice.py         offline voice commands (Vosk), set up into its own environment
 src/weather.py       your local weather (Open-Meteo) and what to wear for it
 src/onboarding.py    the first-run welcome: intro animation, naming, the tour
 src/updates.py       checks GitHub for a newer release, runs the installer to update

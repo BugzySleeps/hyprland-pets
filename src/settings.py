@@ -32,6 +32,7 @@ import weather  # noqa: E402
 import onboarding  # noqa: E402
 import account  # noqa: E402
 import updates  # noqa: E402
+import voice  # noqa: E402
 from version import VERSION  # noqa: E402
 from color_wheel import ColorWheel, from_hex, to_hex  # noqa: E402
 from curve_editor import CurveEditor  # noqa: E402
@@ -48,6 +49,7 @@ TABS = [
     ("play", "Play", "applications-games-symbolic", "Games, music, rides and the little things it gets up to", [
         ("fun", "Fun", [("fun", ["Catch game", "Music", "Vehicles", "Reactions", "Idle behaviour", "Falling"])]),
         ("terminal", "Terminal", [("fun", ["Typing in your terminal", "Terminals"])]),
+        ("voice", "Voice", [("fun", ["Voice commands"])]),
         ("anim", "Moves", [("anim", None)])]),
     ("box", "Box", "weather-clear-symbolic", "Its little world, and where else it shows up on your desktop", [
         ("scene", "Scene", [("box", ["Box and tab", "Ground", "Sky", "Colours", "Tab placement"])]),
@@ -1358,6 +1360,54 @@ class Settings(Gtk.Window):
         filt.add_pixbuf_formats()
         pictures = Path.home() / "Pictures"
 
+        c = self.card("Voice commands", "Say your pet's name, then a command: \"Larry, come here\". Recognised "
+                                        "offline on your computer (Vosk), nothing is ever sent anywhere. It listens "
+                                        "to your default microphone only while this is on")
+        self.voice_switch = Gtk.Switch(active=self.cfg["voice"]["enabled"], halign=Gtk.Align.END,
+                                       valign=Gtk.Align.CENTER)
+        self.voice_switch.connect("notify::active", self.on_voice_switch)
+        c.pack_start(self.setting_row("Listen for voice commands", self.voice_switch,
+                                      "Off by default. Needs a one-time setup (about 45 MB)"), False, False, 0)
+        row = Gtk.Box(spacing=10)
+        self.voice_status = label("", "row-sub", xalign=0, wrap=True)
+        row.pack_start(self.voice_status, True, True, 0)
+        self.voice_setup_btn = icon_button("Set up", "folder-download-symbolic",
+                                           "Downloads the speech recogniser and its English model (about 45 MB)")
+        self.voice_setup_btn.connect("clicked", self.on_voice_setup)
+        row.pack_start(self.voice_setup_btn, False, False, 0)
+        self.voice_remove_btn = icon_button("Remove", "user-trash-symbolic", "Delete the recogniser and model")
+        self.voice_remove_btn.connect("clicked", self.on_voice_remove)
+        row.pack_start(self.voice_remove_btn, False, False, 0)
+        c.pack_start(row, False, False, 0)
+        self.voice_mic = Gtk.ComboBoxText(valign=Gtk.Align.CENTER)
+        self.voice_mic.connect("changed", self.on_voice_mic)
+        c.pack_start(self.setting_row("Microphone", self.voice_mic, "Which mic it listens to"), False, False, 0)
+        self.fill_mics()
+        self.voice_progress = Gtk.ProgressBar()
+        self.voice_progress.set_no_show_all(True)
+        c.pack_start(self.voice_progress, False, False, 0)
+        c.pack_start(label("Say his name, then:", "row-title", xalign=0), False, False, 0)
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, min_children_per_line=2,
+                           max_children_per_line=4, column_spacing=8, row_spacing=8)
+        nice = {"come": "come here", "dance": "dance", "sit": "sit down", "sleep": "go to sleep",
+                "wake": "wake up", "jump": "jump", "ride": "go for a ride", "home": "go home",
+                "out": "come out", "moo": "moo", "good": "good boy", "record": "start recording",
+                "unrecord": "stop recording", "time": "what time is it", "screenshot": "screenshot",
+                "screenshot_all": "screenshot everything", "pause": "pause the music", "play": "play the music",
+                "next": "next song", "previous": "previous song"}
+        for cmd, said in nice.items():
+            b = css_class(Gtk.Button(label=f"“{said}”"), "chip")
+            b.set_tooltip_text(f"Try it: {', '.join(voice.COMMANDS[cmd])}")
+            b.connect("clicked", lambda _b, k=cmd: self.pet.voice_command(k))
+            flow.add(b)
+        c.pack_start(flow, False, False, 0)
+        c.pack_start(label("Or say just the name, wait for the “?”, then the command. There are lots of ways "
+                           "to say each one (hover a button to see them). Click one to try it without speaking. "
+                           "Your pet also answers to its own name if it's a single, ordinary word",
+                           "row-sub", xalign=0, wrap=True), False, False, 0)
+        page.pack_start(c, False, False, 0)
+        GLib.idle_add(lambda: self.show_voice() and False)
+
         c = self.card("Updates", "New versions come out now and then. You'll be told (never updated by "
                                  "surprise): click Update and the installer runs in a terminal")
         self.updates_switch = Gtk.Switch(active=self.cfg["updates"], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
@@ -1477,11 +1527,21 @@ class Settings(Gtk.Window):
             ("sleep", "Fall asleep", "Dozes off when you leave the mouse alone; bring it close to wake it"),
             ("petting", "Petting", "Hold the scroll wheel down and stroke your pet. Keep going and it flops over"),
             ("peek", "Peek out", "With the box shut, it pokes its head out beside the tab now and then"),
+            ("greet", "Say hello when you log in", "Climbs out of its box and stretches. Away a few days? It's "
+                                                    "extra excited to see you"),
+            ("goodbye", "Say goodbye when you shut down", "Waves from the middle of the screen and floats away "
+                                                          "before your computer turns off (or restarts)"),
         ):
-            sw = Gtk.Switch(active=self.cfg["behavior"][key], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+            on = self.cfg["behavior"].get(key, config.DEFAULTS["behavior"].get(key, True))
+            sw = Gtk.Switch(active=on, halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
             sw.connect("notify::active", self.on_behavior, key)
             c.pack_start(self.setting_row(text, sw, sub), False, False, 0)
             self.beh_switches[key] = sw
+            if key == "goodbye" and hasattr(self.pet, "goodbye"):
+                b = icon_button("Try it", "media-playback-start-symbolic", "See the goodbye (nothing shuts down)")
+                b.set_halign(Gtk.Align.START)
+                b.connect("clicked", lambda _b: self.pet.goodbye())
+                c.pack_start(b, False, False, 0)
         self.sleep_after = self.slider(config.SLEEP_MIN, config.SLEEP_MAX, 5, 0, self.cfg["behavior"]["sleep_after"],
                                        " s", self.on_sleep_after)
         c.pack_start(self.setting_row("Falls asleep after", self.sleep_after, "Seconds of a still mouse"), False, False, 0)
@@ -2505,12 +2565,13 @@ class Settings(Gtk.Window):
         self.term_switch.set_active(cfg["terminals"]["enabled"])
         self.fall_switch.set_active(cfg["fall_image"] != "none")
         for key, sw in self.beh_switches.items():
-            sw.set_active(cfg["behavior"][key])
+            sw.set_active(cfg["behavior"].get(key, config.DEFAULTS["behavior"].get(key, True)))
         self.sleep_after.set_value(cfg["behavior"]["sleep_after"])
         for key, sw in self.react_switches.items():
             sw.set_active(cfg["reactions"][key])
         self.game_switch.set_active(cfg["game"])
         self.updates_switch.set_active(cfg["updates"])
+        self.voice_switch.set_active(cfg["voice"]["enabled"])
         self.waybar_switch.set_active(cfg["waybar"])
         self.box_switch.set_active(cfg["box_tab"])
         self.update_box_note()
@@ -2675,7 +2736,7 @@ class Settings(Gtk.Window):
         self.apply()
 
     def on_behavior(self, sw, _p, key):
-        if not self.syncing and self.cfg["behavior"][key] != sw.get_active():
+        if not self.syncing and self.cfg["behavior"].get(key, config.DEFAULTS["behavior"].get(key, True)) != sw.get_active():
             self.cfg["behavior"][key] = sw.get_active()
             self.apply()
 
@@ -2883,6 +2944,90 @@ class Settings(Gtk.Window):
                     "and bring it back. Right-click your pet any time for these settings")
         self.box_note.set_text(text)
         self.box_note.set_visible(bool(text))
+
+    # ── voice ───────────────────────────────────────────────────────────────
+    def show_voice(self, text=None):
+        ok = voice.ready()
+        self.voice_setup_btn.set_visible(not ok)
+        self.voice_remove_btn.set_visible(ok)
+        if text is None:
+            if not ok:
+                text = "Not set up yet: click Set up (one time, about 45 MB)"
+            elif self.cfg["voice"]["enabled"]:
+                if self.pet.voice.running:
+                    text = f"Listening. Try “{self.cfg['name'].split()[0]}, come here”"
+                else:
+                    err = voice.last_error()
+                    text = "Couldn't start listening" + (f": {err}" if err else " (is a microphone plugged in?)")
+            else:
+                text = "Ready. Turn it on to start listening"
+        self.voice_status.set_text(text)
+
+    def fill_mics(self):
+        was, self.syncing = self.syncing, True
+        self.voice_mic.remove_all()
+        self.voice_mic.append("", "System default")
+        ids = [""]
+        for name, desc in voice.mics():
+            nice = desc.replace(" Analog Stereo", "").replace("Built-in Audio", "Laptop mic (built-in)")
+            self.voice_mic.append(name, nice)
+            ids.append(name)
+        cur = self.cfg["voice"]["mic"]
+        if cur and cur not in ids:                  # (unplugged right now: keep it listed)
+            self.voice_mic.append(cur, "Saved mic (not connected)")
+        self.voice_mic.set_active_id(cur)
+        self.syncing = was
+
+    def on_voice_mic(self, combo):
+        mic = combo.get_active_id() or ""
+        if self.syncing or mic == self.cfg["voice"]["mic"]:
+            return
+        self.cfg["voice"]["mic"] = mic
+        self.apply()
+        self.show_voice("Switching microphone…")
+        GLib.timeout_add(1500, lambda: self.show_voice() and False)
+
+    def on_voice_switch(self, sw, _p):
+        if self.syncing or self.cfg["voice"]["enabled"] == sw.get_active():
+            return
+        self.cfg["voice"]["enabled"] = sw.get_active()
+        self.apply()
+        GLib.timeout_add(1500, lambda: self.show_voice() and False)
+        if sw.get_active() and not voice.ready():
+            self.show_voice("Click Set up first (one time, about 45 MB), then it starts listening")
+
+    def on_voice_setup(self, btn):
+        btn.set_sensitive(False)
+        self.voice_progress.show()
+
+        def progress(text, frac):
+            GLib.idle_add(lambda: (self.voice_status.set_text(text), self.voice_progress.set_fraction(frac),
+                                   False)[-1])
+
+        def work():
+            try:
+                voice.setup(progress)
+                err = None
+            except Exception as e:     # (setup errors, no network, no venv...)
+                err = str(e)
+            GLib.idle_add(done, err)
+
+        def done(err):
+            btn.set_sensitive(True)
+            self.voice_progress.hide()
+            if err:
+                self.show_voice(f"Setup didn't work: {err}")
+                return False
+            self.sound.play("on")
+            self.pet.update_voice()
+            GLib.timeout_add(1500, lambda: self.show_voice() and False)
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_voice_remove(self, _b):
+        self.pet.voice.stop()
+        voice.remove()
+        self.show_voice()
 
     # ── updates ─────────────────────────────────────────────────────────────
     def show_update(self):

@@ -377,6 +377,55 @@ def pose_dangle(frame):
     return make
 
 
+# waving goodbye: his right front leg (the solid one, behind the white one) lifts from the shoulder
+LARRY_RIGHT_FRONT = ((290, 306), (338, 302), (340, 330), (332, 368), (322, 402), (318, 440), (322, 470),
+                     (300, 472), (300, 456), (290, 450))   # its outline, larry.png pixels
+LARRY_SHOULDER = (314, 326)
+WAVE_ANGLES = range(0, 81, 8)   # degrees forward: 0 = standing, 80 = held up high
+
+
+def lift_leg(pet, angle, bbox, edge):
+    """Swing the right front leg forward and up by angle degrees around his shoulder, in place on
+    the bare picture, with a thin coat-coloured edge so it shows where it crosses his black chin."""
+    bx0, by0, bx1, _by1 = bbox
+    k = pet.width / (bx1 - bx0)
+    at = lambda x, y: ((x - bx0) * k, (y - by0) * k)
+    mask = Image.new("L", pet.size, 0)
+    ImageDraw.Draw(mask).polygon([at(*p) for p in LARRY_RIGHT_FRONT], fill=255)
+    leg = Image.new("RGBA", pet.size, (0, 0, 0, 0))
+    leg.paste(pet, (0, 0), mask)
+    body = pet.copy()
+    body.paste((0, 0, 0, 0), (0, 0), mask)
+    if angle:
+        leg = leg.rotate(angle, resample=Image.BICUBIC, center=at(*LARRY_SHOULDER))
+        rim = leg.getchannel("A").filter(ImageFilter.MaxFilter(max(3, round(5 * k) | 1)))
+        ring = Image.new("RGBA", pet.size, (*edge, 0))
+        ring.putalpha(rim)
+        body.alpha_composite(ring)
+    body.alpha_composite(leg)
+    pet.paste(body)
+
+
+def load_wave(cfg, scale=1):
+    """Larry waving, facing right: [frame for each of WAVE_ANGLES], or None for other pets."""
+    if not is_larry(cfg):
+        return None
+    c = {**cfg, "size": round(cfg["size"] * scale)} if scale != 1 else cfg
+    bbox = Image.open(LARRY).getchannel("A").getbbox()
+    edge = (coat(cfg) or ((255, 255, 255),))[0]
+    frames = []
+    for a in WAVE_ANGLES:
+        out = CACHE / f"{sprite_key(c, f'|wave-{a}-1')}-wave.png"
+        if not out.exists():
+            CACHE.mkdir(parents=True, exist_ok=True)
+            sticker(composite(c, lambda pet, a=a: lift_leg(pet, a, bbox, edge))[0], c, scale).save(out)
+        surf = cairo.ImageSurface.create_from_png(str(out))
+        if scale != 1:
+            surf.set_device_scale(scale, scale)
+        frames.append(surf)
+    return frames
+
+
 def pose_eyeless(cfg):
     return pose_maps(cfg, eyes="open")[0]
 

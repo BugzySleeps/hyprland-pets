@@ -18,6 +18,7 @@ import math
 import os
 import random
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -46,6 +47,9 @@ import vehicles
 import waybar  # noqa: E402
 import weather  # noqa: E402
 import updates  # noqa: E402
+import voice  # noqa: E402
+import recorder  # noqa: E402
+import desktop  # noqa: E402
 import sprites  # noqa: E402
 import watch  # noqa: E402
 
@@ -56,6 +60,7 @@ TAB_W, TAB_H = 46, 12           # the handle hanging under it
 FPS = 30
 
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "larry" / "game.json"
+SEEN = STATE.with_name("seen.json")   # {"last": when he was last running, "session": the Hyprland login he greeted}
 HYPR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hypr" / os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
 
 
@@ -207,6 +212,18 @@ class Larry(Gtk.Window):
         self.next_ride = time.monotonic() + self.ride_gap()
         self.watcher = watch.Watcher(self.on_finished)
         self.weather_checked = 0.0
+        self.come_to = None       # voice "come here": the screen x he's walking to (and until when)
+        self.come_until = 0.0
+        self.voice_dance_until = 0.0
+        self.bye = None           # waving goodbye: {"start", "kind" (poweroff / reboot / None for a preview)}
+        self.bye_lock = None      # logind's shutdown "delay" lock (an fd): shutdown waits until we let go
+        self.bye_sprites = None   # (standing, waving frames or None) drawn big and sharp for the goodbye
+        GLib.idle_add(lambda: self.watch_shutdown() and False)
+        self.greeting = None      # saying hello after you log in: {"away" (seconds), "start" (of the stretch)}
+        GLib.timeout_add(2500, self.greet_maybe)              # (once everything, Waybar too, is up)
+        GLib.timeout_add_seconds(300, self.mark_seen)
+        self.voice = voice.Listener(self.voice_command, self.voice_wake)
+        self.update_voice()
         self.schedule_peek()
         GLib.timeout_add_seconds(45, self.check_updates)      # (then twice a day: see check_updates)
         if not self.has_box:          # no box to live in: start out on the desktop
@@ -779,6 +796,7 @@ class Larry(Gtk.Window):
 
     def set_config(self, cfg):
         """Swap in new settings live (called by the settings window)."""
+        GLib.timeout_add(500, lambda: self.prepare_bye() and False)   # (his look may have changed)
         self.watcher.configure(cfg["reactions"]["packages"], cfg["reactions"]["downloads"])
         self.music.configure(cfg["dance"]["enabled"], cfg["dance"]["beat"])
         theme_changed = cfg["theme"] != self.cfg["theme"]
@@ -818,6 +836,11 @@ class Larry(Gtk.Window):
             self.recolor()
         if weather_changed:
             self.start_weather()
+        if cfg["behavior"].get("goodbye") != self.cfg["behavior"].get("goodbye"):
+            GLib.idle_add(lambda: (self.take_bye_lock() if self.cfg["behavior"].get("goodbye", False)
+                                   else self.drop_bye_lock()) and False)
+        if cfg["voice"] != self.cfg["voice"] or cfg["name"] != self.cfg["name"]:
+            GLib.idle_add(lambda: self.update_voice() and False)
         if box_changed:
             self.pinned, self.hover_until = False, 0.0
             self.damage_box()
@@ -1168,10 +1191,12 @@ class Larry(Gtk.Window):
             self.popups = [p_ for p_ in self.popups
                            if now - p_["start"] < self.POPUP_TIME * (1.6 if p_["big"] else 1) + 0.1]
 
+        if self.bye:
+            self.queue_draw()
         self.flush_damage()
         self.update_input()
 
-        busy = (self.open != want or self.open > 0 or self.mode in ("free", "drag") or self.popups or self.hearts
+        busy = (self.bye or self.open != want or self.open > 0 or self.mode in ("free", "drag") or self.popups or self.hearts
                 or self.pet_love or self.poofs or self.pop_start is not None or self.peeking is not None)
         if not busy:
             self.ticking = None
@@ -1393,7 +1418,7 @@ class Larry(Gtk.Window):
             self.end_streak()
             self.damage_larry()
             self.mode, self.platform, self.vx, self.vy = "box", None, 0.0, 0.0
-            self.act, self.reaction = None, None
+            self.act, self.reaction, self.greeting = None, None, None
             self.bx = (self.box_w - self.lw) / 2
             self.peek(1.6)                                   # open up so you see him land
             self.pop_start = now
@@ -1463,6 +1488,157 @@ class Larry(Gtk.Window):
             return 1.0
         p = max(p, 0.0)
         return 1 + 2.4 * (p - 1) ** 3 + 1.4 * (p - 1) ** 2
+
+    # ── voice commands ──────────────────────────────────────────────────────
+    def update_voice(self):
+        """Listen while voice commands are on (and set up); stop otherwise."""
+        if self.cfg["voice"]["enabled"] and voice.ready():
+            self.voice.start(self.cfg["name"], self.cfg["voice"]["mic"])
+        else:
+            self.voice.stop()
+
+    def voice_record(self, start):
+        """Start or stop a screen recording, and say how it went."""
+        def work():
+            try:
+                if start:
+                    recorder.start()
+                    res = (True, "● Recording")
+                else:
+                    res = (True, "Saved!") if recorder.stop() else (False, "Not recording")
+            except recorder.RecordError as e:
+                msg = {"wl-screenrec isn't installed": "I need wl-screenrec", "already recording": "Already recording!"}
+                res = (False, msg.get(str(e), "Couldn't record"))
+                if str(e) not in msg:
+                    print(f"larry: recording: {e}", file=sys.stderr)
+            GLib.idle_add(lambda: self.on_finished("voice", *res) and False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def voice_desktop(self, cmd):
+        """Screenshots and music controls (desktop.py), off the main thread, and say how it went."""
+        def work():
+            try:
+                if cmd.startswith("screenshot"):
+                    res = (True, "Snap!") if desktop.screenshot(area=cmd == "screenshot") else (True, "Never mind")
+                else:
+                    res = (True, voice.SAY[cmd]) if desktop.music(cmd) else (False, "No music on")
+            except (desktop.DesktopError, OSError, subprocess.SubprocessError) as e:
+                res = (False, f"I need {str(e).split()[0]}" if "isn't installed" in str(e) else "Couldn't do it")
+                if "isn't installed" not in str(e):
+                    print(f"larry: {cmd}: {e}", file=sys.stderr)
+            GLib.idle_add(lambda: self.on_finished("voice", *res) and False)
+        if cmd == "screenshot":
+            self.popup("Drag an area", False)            # (slurp waits for you)
+        threading.Thread(target=work, daemon=True).start()
+
+    def voice_wake(self):
+        """Heard just his name: perk up, turn to you and wait for a command (voice.ARMED seconds)."""
+        now = time.monotonic()
+        self.poked = self.cursor_moved = now
+        if self.act == "sleep":
+            self.act = None
+        if self.mode == "box":
+            self.peek(voice.ARMED)
+        elif not self.ride and self.platform:
+            self.pause = max(self.pause, voice.ARMED)       # stops to listen
+            self.cursor_t = 0.0
+            self.poll_cursor(now)
+            if self.cursor:
+                self.dir = 1 if self.cursor[0] > self.larry_pos()[0] + self.lw / 2 else -1
+        self.popup("?", True)
+        self.wake()
+
+    def voice_command(self, cmd, heard=""):
+        """He heard you: do it (see voice.COMMANDS)."""
+        now = time.monotonic()
+        self.poked = self.cursor_moved = now           # (he's being talked to: wide awake)
+        self.cursor_t = 0.0                            # (where the cursor is right now, not 0.1 s ago)
+        self.poll_cursor(now)
+        if cmd not in ("home", "good", "moo"):
+            if self.typist:
+                self.typist.stop()
+                self.typist = None
+            if self.act in ("sleep", "sit", "dance") and cmd != self.act:
+                self.act = None
+            self.reaction = None
+        busy_air = self.mode == "drag" or (self.mode == "free" and not self.platform)
+        if busy_air and cmd not in ("good", "moo"):
+            return                                     # (in your hand or flying: can't do much)
+        if cmd == "come":
+            if self.mode == "box":
+                self.pop()
+            self.stop_ride()
+            if self.cursor:
+                self.come_to, self.come_until = self.cursor[0], now + 10
+            self.act, self.watching, self.pause = None, False, 0
+        elif cmd == "out":
+            if self.mode == "box":
+                self.pop()
+        elif cmd == "home":
+            if self.mode == "free":
+                self.pop()                             # (poofs him back into the box)
+        elif cmd == "dance":
+            if self.mode == "box":
+                self.peek(14)
+            self.stop_ride()
+            self.voice_dance_until = now + 12
+            self.start_dance(now)
+            self.dance_until = now + 12
+        elif cmd == "sit":
+            self.stop_ride()
+            self.act, self.act_until = "sit", now + 10
+        elif cmd == "sleep":
+            self.stop_ride()
+            self.act, self.watching = "sleep", False
+            self.asleep_since = self.last_chat = now
+            self.chats = 0
+            self.cursor_moved = now - 60                # (so moving the mouse doesn't wake him at once)
+        elif cmd == "wake":
+            if self.act == "sleep":
+                self.act, self.pause = None, 1.0
+        elif cmd == "jump":
+            if self.mode == "free" and self.platform:
+                self.platform, self.vy = None, -620.0
+                self.refresh_platforms()
+            else:
+                self.on_finished("voice", True, None)   # (in the box: a happy little hop)
+        elif cmd == "ride":
+            if self.mode == "box":
+                self.peek(8)
+            self.start_ride()
+        elif cmd == "moo":
+            self.clips.play(random.choice([n for n in ("moo", "moo-short", "moo-calf", "moo-moo")]))
+            self.on_finished("voice", True, "Moo!")
+            return
+        elif cmd in ("record", "unrecord"):         # the screen recorder (wl-screenrec): off the main thread
+            self.voice_record(cmd == "record")
+            return
+        elif cmd == "time":                          # (always shows, even with reaction bubbles off)
+            self.on_finished("voice", True, None)
+            self.reaction["text"] = time.strftime("%-I:%M %p").lower()
+            return
+        elif cmd in ("screenshot", "screenshot_all", "pause", "play", "next", "previous"):
+            self.voice_desktop(cmd)
+            return
+        elif cmd == "mean":                          # he heard that: slumps, turns his back, sulks
+            self.on_finished("voice", False, random.choice(voice.SAD))
+            self.cursor_t = 0.0
+            self.poll_cursor(now)
+            if self.cursor and self.mode != "box":
+                self.dir = -1 if self.cursor[0] > self.larry_pos()[0] + self.lw / 2 else 1
+            self.pause = max(self.pause, 4.0)
+            return
+        elif cmd == "good":
+            self.on_finished("voice", True, None)
+            x, y = self.larry_pos()
+            for i in range(5):
+                self.add_heart(x + self.lw * (0.2 + 0.15 * i), y + self.lh * 0.3, delay=i * 0.08)
+            return
+        if self.mode == "box" and cmd not in ("out", "come", "home"):
+            self.peek(4)                               # (so you can see him do it)
+        self.popup(voice.SAY[cmd], False)
+        self.damage_larry()
+        self.wake()
 
     # ── petting ─────────────────────────────────────────────────────────────
     PET_FLOP = 10.0     # pet heights of stroking (without a break) before he flops over, blissed out
@@ -1812,6 +1988,254 @@ class Larry(Gtk.Window):
             up = (self.rider_head(kind) - 1) * L * min(s, 1)
             self.draw_reaction(cr, x, y - up - r["alt"], t - self.reaction["start"], self.reaction)
 
+    # ── saying hello when you log in ────────────────────────────────────────
+    STRETCH_TIME = 2.6
+    AWAY_DAYS = 2      # away at least this long and he's extra excited to see you
+
+    @staticmethod
+    def read_seen():
+        try:
+            d = json.loads(SEEN.read_text())
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def mark_seen(self, session=None):
+        """Note that he's here right now (so next login knows how long you were away)."""
+        d = self.read_seen()
+        d["last"] = time.time()
+        if session is not None:
+            d["session"] = session
+        try:
+            SEEN.parent.mkdir(parents=True, exist_ok=True)
+            SEEN.write_text(json.dumps(d))
+        except OSError:
+            pass
+        return True
+
+    def greet_maybe(self):
+        """First start in this Hyprland login (not a restart of the pet): say hello."""
+        seen = self.read_seen()
+        session = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        last = seen.get("last")
+        away = time.time() - last if isinstance(last, (int, float)) else 0.0
+        self.mark_seen(session)
+        if (session and session != seen.get("session") and self.cfg["behavior"].get("greet", True)
+                and self.get_visible()):
+            self.greet(away)
+        return False
+
+    def greet(self, away=0.0):
+        """Out of the box he climbs; once he lands he has a big stretch, then says hi."""
+        self.greeting = {"away": away, "start": None}
+        if self.mode == "box":
+            self.pop()
+        self.wake()
+
+    def greet_text(self, away):
+        days = away / 86400
+        if days >= 30:
+            return "It's been forever!!"
+        if days >= 7:
+            return "You're back!!"
+        if days >= self.AWAY_DAYS:
+            return "I missed you!"
+        h = time.localtime().tm_hour
+        return ("You're up late!" if h < 5 else "Good morning!" if h < 12 else "Good afternoon!" if h < 18
+                else "Good evening!")
+
+    def step_greeting(self, now):
+        """(from behave, on his feet) The stretch, then the hello."""
+        g = self.greeting
+        if g["start"] is None:
+            g["start"] = now
+            self.act, self.watching, self.reaction, self.come_to = "stretch", False, None, None
+            self.damage_larry()
+            return
+        if now - g["start"] < self.STRETCH_TIME:
+            return
+        self.greeting, self.act = None, None
+        excited = g["away"] >= self.AWAY_DAYS * 86400
+        long = 5.5 if excited else self.REACT_TIME
+        self.reaction = {"mood": "happy", "start": now, "until": now + long, "text": self.greet_text(g["away"]),
+                         "hops": long - 0.8 if excited else 1.7}
+        self.poked = self.cursor_moved = now
+        if excited:                                    # hearts everywhere, a moo, and over to you he runs
+            x, y = self.larry_pos()
+            for i in range(8):
+                self.add_heart(x + self.lw * random.uniform(0.1, 0.9), y + self.lh * 0.3, delay=i * 0.1)
+            if sprites.is_larry(self.cfg):
+                self.clips.play("moo-moo")
+            self.cursor_t = 0.0
+            self.poll_cursor(now)
+            if self.cursor:
+                self.come_to, self.come_until = self.cursor[0], now + long + 10
+        self.damage_larry()
+
+    def stretch_pose(self, t):
+        """(tilt forward, squash, eyes shut, yawn) through the stretch: a long bow, front legs out,
+        then up onto his toes with a big yawn, and settle."""
+        k = (t - self.greeting["start"]) / self.STRETCH_TIME if self.greeting and self.greeting["start"] else 1
+        ease = lambda u: 0.5 - 0.5 * math.cos(math.pi * max(0.0, min(1.0, u)))
+        if k < 0.45:                                   # down into the bow
+            e = ease(k / 0.3)
+            return 0.24 * e, 0.14 * e + 0.01 * math.sin(t * 9) * e, e > 0.5, False
+        if k < 0.65:                                   # up and back, tall, mouth wide
+            e = ease((k - 0.45) / 0.2)
+            return 0.24 - 0.36 * e, 0.15 - 0.27 * e, True, True
+        e = ease((k - 0.65) / 0.35)                    # settles back to normal
+        return -0.12 * (1 - e), -0.12 * (1 - e), e < 0.6, e < 0.5
+
+    # ── waving goodbye when you shut down ───────────────────────────────────
+    # systemd-logind lets us hold off a shutdown or reboot for a moment (up to InhibitDelayMaxSec,
+    # 5 s by default) with a "delay" lock; it says PrepareForShutdown, we wave, then let go.
+    BYE_TIME = 3.8
+
+    def watch_shutdown(self):
+        from gi.repository import Gio
+        try:
+            self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        except GLib.Error:
+            return
+        self.bus.signal_subscribe("org.freedesktop.login1", "org.freedesktop.login1.Manager",
+                                  "PrepareForShutdownWithMetadata", "/org/freedesktop/login1", None,
+                                  Gio.DBusSignalFlags.NONE, self.on_shutdown)
+        self.bus.signal_subscribe("org.freedesktop.login1", "org.freedesktop.login1.Manager",
+                                  "PrepareForShutdown", "/org/freedesktop/login1", None,
+                                  Gio.DBusSignalFlags.NONE, self.on_shutdown)
+        self.take_bye_lock()
+        self.prepare_bye()
+
+    BYE_SCALE = 2.4
+
+    def prepare_bye(self):
+        """Draw his goodbye sprites ahead of time (on a worker thread): no time for it at shutdown."""
+        cfg = self.dress(self.cfg)
+
+        def work():
+            try:
+                big = sprites.load(cfg, self.BYE_SCALE)
+                wave = sprites.load_wave(cfg, self.BYE_SCALE)       # (Larry only: others just sway)
+            except Exception as e:
+                print(f"larry: goodbye sprites: {e}", file=sys.stderr)
+                return
+            GLib.idle_add(lambda: setattr(self, "bye_sprites", (big, wave)) and False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def take_bye_lock(self):
+        """Ask logind to wait for us at shutdown (only while saying goodbye is turned on)."""
+        if self.bye_lock is not None or not self.cfg["behavior"].get("goodbye", False):
+            return
+        from gi.repository import Gio
+        try:
+            res, fds = self.bus.call_with_unix_fd_list_sync(
+                "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "Inhibit",
+                GLib.Variant("(ssss)", ("shutdown", "hyprland-pets", "Waving goodbye", "delay")),
+                GLib.VariantType("(h)"), Gio.DBusCallFlags.NONE, 3000, None, None)
+            self.bye_lock = fds.steal_fds()[res.unpack()[0]]
+        except (GLib.Error, AttributeError, IndexError) as e:
+            print(f"larry: no goodbye at shutdown ({e})", file=sys.stderr)
+
+    def drop_bye_lock(self):
+        if self.bye_lock is not None:
+            try:
+                os.close(self.bye_lock)
+            except OSError:
+                pass
+            self.bye_lock = None
+        return False
+
+    def on_shutdown(self, _bus, _sender, _path, _iface, signal, params):
+        args = params.unpack()
+        if not args[0]:                       # shutdown called off: be ready for the next one
+            self.take_bye_lock()
+            return
+        kind = "poweroff"
+        if len(args) > 1 and isinstance(args[1], dict):
+            kind = args[1].get("type", "poweroff") or "poweroff"
+        if self.bye and self.bye["kind"]:     # (both signals come: the second just says which kind)
+            if signal != "PrepareForShutdown":
+                self.bye["kind"] = kind
+            return
+        if self.bye_lock is None:
+            return                            # (turned off: nothing to wait for)
+        self.goodbye(kind)
+
+    def goodbye(self, kind=None):
+        """The pet in the middle of the screen: waves, then floats up and away. kind None is a preview."""
+        self.bye = {"start": time.monotonic(), "kind": kind}
+        if not self.get_visible():            # (hidden behind a fullscreen window: come back for this)
+            self.show_all()
+        if kind:
+            GLib.timeout_add(int(self.BYE_TIME * 1000), self.drop_bye_lock)   # (however the drawing is going)
+        self.input_key = None
+        self.update_input()
+        self.queue_draw()
+        self.wake()
+
+    def bye_frame(self, now):
+        """Where the goodbye is: (backdrop 0..1, scale, rise px, tilt, squash, leg angle), or None."""
+        t = now - self.bye["start"]
+        end = self.BYE_TIME + (0.5 if self.bye["kind"] is None else 3)   # (shutting down: stays black)
+        if t > end:
+            return None
+        ease = lambda u: 0.5 - 0.5 * math.cos(math.pi * max(0.0, min(1.0, u)))
+        dim = 0.55 * ease(t / 0.35)
+        if t > 3.3:                                       # fade to black...
+            dim = 0.55 + 0.45 * ease((t - 3.3) / 0.45)
+        if self.bye["kind"] is None and t > self.BYE_TIME:   # (...a preview fades back afterwards)
+            dim = 1 - ease((t - self.BYE_TIME) / 0.5)
+        pop = min(1.0, t / 0.35)
+        scale = 1 + 0.25 * math.sin(pop * math.pi) * (1 - pop) * 2 if pop < 1 else 1.0
+        scale *= 0.2 + 0.8 * ease(pop * 1.2)
+        tilt = squash = rise = leg = 0.0
+        if 0.35 <= t < 2.1:                               # up comes his right front leg, and he waves
+            w = t - 0.35
+            up = ease(w / 0.25) * ease((2.1 - t) / 0.25)
+            leg = up * (65 + 15 * math.sin(max(0.0, w - 0.25) * 2 * math.pi * 1.8))
+            tilt = -0.03 * up                             # (leaning back a touch to lift it)
+        elif 2.1 <= t < 2.35:                             # crouch...
+            squash = 0.14 * ease((t - 2.1) / 0.25)
+        elif t >= 2.35:                                   # ...and up he goes
+            u = (t - 2.35) / 0.95
+            rise = (self.H * 0.75) * u ** 2
+            squash = -0.14 * min(1, u * 3)
+        return dim, scale, rise, tilt, squash, leg
+
+    def draw_bye(self, cr):
+        now = time.monotonic()
+        f = self.bye_frame(now)
+        if f is None:
+            self.bye = None
+            return False
+        dim, scale, rise, tilt, squash, leg = f
+        cr.set_source_rgba(0, 0, 0, dim)
+        cr.paint()
+        if rise > self.H:
+            return True
+        big = self.BYE_SCALE * scale
+        stand, wave = self.bye_sprites or (self.sprites, None)
+        sprite = stand[0]
+        if leg and wave:                                  # (the nearest of the pre-drawn leg angles)
+            sprite = wave[min(range(len(wave)), key=lambda i: abs(sprites.WAVE_ANGLES[i] - leg))]
+        elif leg:                                         # (not Larry: a little side-to-side sway instead)
+            tilt = 0.12 * math.sin((now - self.bye["start"]) * 2 * math.pi * 1.6) * leg / 80
+        sh = sprites.logical_size(sprite)[1] * self.BYE_SCALE
+        cx, feet = self.W / 2, self.H / 2 + sh / 2 - rise   # (right in the middle)
+        cr.save()
+        cr.translate(cx, feet)
+        cr.scale(big, big)
+        sprites.draw_pet(cr, sprite, 0, 0, tilt, 0, squash)
+        cr.restore()
+        if rise:                                          # a little trail of hearts where he was
+            u = min(1, rise / (self.H * 0.75))
+            for i in range(5):
+                hy = self.H / 2 + sh / 2 - rise * (0.2 + 0.15 * i)
+                self.heart(cr, cx + math.sin(i * 2.3) * self.lw * 0.8, hy, self.lh * 0.12,
+                           (0.95, 0.33, 0.45, max(0, 1 - u) * 0.9))
+                cr.fill()
+        return True
+
     # ── catch game ──────────────────────────────────────────────────────────
     MIN_TOSS = 60   # px he has to go up for a catch to count
 
@@ -2017,6 +2441,9 @@ class Larry(Gtk.Window):
         recent = now - self.cursor_moved < 2.0
         if self.ride or self.being_petted(now):
             return
+        if self.greeting:
+            self.step_greeting(now)
+            return
         if self.act == "type":
             if recent and dist < self.WAKE_R:          # you're back: stop mid-sentence
                 self.typist.stop()
@@ -2025,7 +2452,7 @@ class Larry(Gtk.Window):
                 self.typist, self.act, self.last_chat = None, "sleep", now
             return
         if self.act == "dance":
-            if not self.music.playing or now > self.dance_until:
+            if (not self.music.playing and now > self.voice_dance_until) or now > self.dance_until:
                 self.act, self.pause = None, 0.8
                 self.next_dance = now + (random.uniform(8, 20) if self.music.playing else 0)
                 self.damage_larry()
@@ -2049,7 +2476,7 @@ class Larry(Gtk.Window):
             self.asleep_since = self.last_chat = now
             self.chats = 0
             return
-        self.watching = b["watch"] and recent and dist < self.WATCH_R
+        self.watching = b["watch"] and recent and dist < self.WATCH_R and self.come_to is None
         if self.watching and abs(self.cursor[0] - cx) > w * 0.3:
             self.dir = 1 if self.cursor[0] > cx else -1
         if (self.cfg["ride"]["enabled"] and now >= self.next_ride and not (self.act or self.watching
@@ -2203,6 +2630,18 @@ class Larry(Gtk.Window):
             dx = self.dir * speed * vehicles.SPEED[r["kind"]] * dt
             r["dist"] += abs(dx)
             return dx
+        if self.come_to is not None:                    # called over: straight there, a bit quicker
+            cx = self.larry_pos()[0] + self.lw / 2
+            d = self.come_to - cx
+            if abs(d) < 6 or time.monotonic() > self.come_until:
+                self.come_to, self.pause = None, 1.2
+                self.walking, self.phase = False, 0
+                return 0
+            self.dir = 1 if d > 0 else -1
+            self.walking = True
+            step = min(abs(d), speed * 1.5 * dt)          # a little quicker than strolling...
+            self.phase += speed * dt / a.step_length      # ...but his steps keep their normal pace
+            return self.dir * step
         if self.pause > 0:
             self.pause -= dt
             self.walking, self.phase = False, 0
@@ -2329,6 +2768,8 @@ class Larry(Gtk.Window):
         cr.set_source_rgba(0, 0, 0, 0)
         cr.paint()
         cr.set_operator(cairo.OPERATOR_OVER)
+        if self.bye and self.draw_bye(cr):
+            return
         c = self.colors
         bx, by, bw, bh, stretch = self.box_geom()
         tx, ty, tw, th = self.tab_rect()
@@ -2450,7 +2891,7 @@ class Larry(Gtk.Window):
         if r:
             age = t - r["start"]
             if r["mood"] == "happy":   # a few hops, happy eyes
-                hop = abs(math.sin(age * math.pi * 2.4)) if age < 1.7 else 0
+                hop = abs(math.sin(age * math.pi * 2.4)) if age < r.get("hops", 1.7) else 0
                 tilt, bob, squash = 0.12 * math.sin(age * 9) * hop, hop * self.lh * 0.32, -0.08 * hop
             else:                      # slumps, a little shake of the head
                 droop = min(age / 0.5, 1)
@@ -2475,6 +2916,14 @@ class Larry(Gtk.Window):
             else:                        # anyone else: a little keyboard in front of them
                 sprites.draw_pet(cr, sprite, x + self.lw / 2, y + self.lh, 0, abs(math.sin(t * 9)) * 1.5, 0)
                 self.draw_keyboard(cr, x + self.lw * (0.75 if self.dir > 0 else 0.25), y + self.lh, t)
+            return
+        if self.act == "stretch":
+            lean, squash, shut, yawn = self.stretch_pose(t)
+            if shut and "eyeless" in self.poses:          # (eyes squeezed shut: the happy ^ ^ ones)
+                sprite, extra = self.poses["eyeless"][side], self.draw_mood_eyes
+            sprites.draw_pet(cr, sprite, x + self.lw / 2, y + self.lh, lean * self.dir, 0, squash, extra)
+            if yawn:
+                self.bubble(cr, x + self.lw / 2, y - self.lh * 0.1, "*yaaawn*", 1)
             return
         if self.act == "sleep":
             sprite = self.poses.get("sleep", self.sprites)[side]
@@ -2643,16 +3092,19 @@ class Larry(Gtk.Window):
 def main():
     GLib.set_prgname("larry")  # app id for the settings window (Hyprland floats it)
     want_settings = "--settings" in sys.argv[1:]
+    want_bye = "--goodbye" in sys.argv[1:]      # (a preview: nothing shuts down)
     # one pet at a time: the running one owns this socket; a second launch just pokes it
     sock = socket.socket(socket.AF_UNIX)
     try:
         sock.bind("\0larry-the-cow")
     except OSError:
-        if want_settings:
+        if want_settings or want_bye:
             with socket.socket(socket.AF_UNIX) as c:
                 c.connect("\0larry-the-cow")
-                c.sendall(b"settings")
+                c.sendall(b"goodbye" if want_bye else b"settings")
         sys.exit(0)
+    if want_bye:
+        sys.exit("hyprland-pets isn't running")
     sock.listen(4)
     pet = Larry()
 
@@ -2667,6 +3119,8 @@ def main():
                     conn.sendall(json.dumps(pet.status()).encode())
                 except OSError:
                     pass
+            elif cmd == b"goodbye":
+                pet.goodbye()
             elif cmd in (b"pop", b"toggle"):   # its click: pop out of the box (or poof back in)
                 pet.pop()
         return True
@@ -2682,6 +3136,8 @@ def main():
     finally:
         pet.music.close()
         waybar.blank()                         # the Waybar icon goes away with the pet
+        pet.mark_seen()
+        pet.voice.stop()
 
 
 if __name__ == "__main__":

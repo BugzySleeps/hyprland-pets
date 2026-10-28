@@ -46,6 +46,8 @@ DEFAULTS = {
         "sleep_after": 60,             # seconds of a still mouse before he falls asleep
         "peek": True,                  # with the box shut, pokes his head out beside the tab now and then
         "petting": True,               # hold the middle mouse button (scroll wheel) and stroke him
+        "greet": True,                 # climbs out and stretches when you log in (excited after a few days away)
+        "goodbye": False,              # waves goodbye in the middle of the screen when you shut down or reboot
     },
     "reactions": {
         "packages": True,              # cheers when a package manager finishes (sad if it failed)
@@ -65,6 +67,10 @@ DEFAULTS = {
         "enabled": True,               # dances while music is playing (any MPRIS player)
         "beat": True,                  # listen with cava to dance in time (if cava is installed)
         "notes": True,                 # music notes float up while it dances
+    },
+    "voice": {
+        "enabled": False,              # voice commands ("Larry, come here"), recognised offline (see voice.py)
+        "mic": "",                     # which microphone (a PipeWire/Pulse source name; "" = the default one)
     },
     "updates": True,                   # check GitHub for new releases (and tell you; never installs by itself)
     "waybar": False,                   # Larry in your Waybar (a module on the left; see waybar.py)
@@ -109,6 +115,7 @@ COMMENTS = {
     "updates": "check GitHub about twice a day for a new version, and tell you (nothing installs by itself)",
     "box_tab": "show the pull-down box and its tab (turn off to keep just the pet, e.g. with the Waybar module)",
     "waybar": "show Larry in your Waybar (the settings window adds the module on the left)",
+    "mic": "microphone for voice commands (a source name from `pactl list sources`; empty = your default)",
     "place": "where the weather is checked for (search for it in the settings window)",
     "lat": "its latitude",
     "lon": "its longitude",
@@ -151,6 +158,8 @@ COMMENTS = {
     "sleep_after": f"seconds of a still mouse before falling asleep ({SLEEP_MIN}-{SLEEP_MAX})",
     "petting": "hold the middle mouse button (scroll wheel) and move over the pet to pet it",
     "peek": "with the box closed, the pet pokes its head out beside the tab now and then",
+    "goodbye": "when you shut down or reboot, the pet waves goodbye in the middle of the screen and floats away (off by default)",
+    "greet": "when you log in, the pet climbs out of its box and stretches (extra excited if you've been away a few days)",
     "sounds": "click and tick sounds in the settings window",
     "volume": "sound volume (0-100)",
     "ground": "grass | dirt | sand | snow | stone | none, or img-<name> for ~/.config/larry/grounds/<name>.png",
@@ -210,7 +219,7 @@ def parse(user):
         cfg["tab"]["position"] = max(0, min(100, round(pos)))
 
     ubeh = user.get("behavior") if isinstance(user.get("behavior"), dict) else {}
-    for key in ("watch", "sit", "sleep", "petting", "peek"):
+    for key in ("watch", "sit", "sleep", "petting", "peek", "greet", "goodbye"):
         if isinstance(ubeh.get(key), bool):
             cfg["behavior"][key] = ubeh[key]
     v = ubeh.get("sleep_after")
@@ -237,6 +246,12 @@ def parse(user):
     for key in ("enabled", "beat", "notes"):
         if isinstance(udance.get(key), bool):
             cfg["dance"][key] = udance[key]
+
+    uvoice = user.get("voice") if isinstance(user.get("voice"), dict) else {}
+    if isinstance(uvoice.get("enabled"), bool):
+        cfg["voice"]["enabled"] = uvoice["enabled"]
+    if isinstance(uvoice.get("mic"), str) and re.fullmatch(r"[\w.:-]{0,200}", uvoice["mic"]):
+        cfg["voice"]["mic"] = uvoice["mic"]
 
     uweather = user.get("weather") if isinstance(user.get("weather"), dict) else {}
     for key in ("enabled", "effects"):
