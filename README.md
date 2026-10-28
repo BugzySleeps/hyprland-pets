@@ -276,10 +276,7 @@ tools/make_falling_larry.py  draws Larry's falling, held (waddling), typing and 
 
 ## How this was made
 
-Full honesty: this whole thing was vibecoded with Claude Opus 5.5. I described what I wanted, it
-wrote the code, I poked at it, said "no, make it less ugly", and we went round again. It was just a
-fun little project because I was bored, and somehow it turned into a cow with a wardrobe, a weather
-app, a Waybar module and a helicopter. Enjoy Larry.
+I was bored one day and decided to make a desktop pet for hyprland, now I don't know how to code except for some experience in CSS if you count that. I did use claude code opus 5.5 model, this was just a fun project to be honest, enjoy it.
 
 ## License
 
