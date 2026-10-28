@@ -11,6 +11,8 @@ is set in the settings window (`--settings`) and saved to ~/.config/larry/config
 One fullscreen transparent overlay layer surface; its input region only covers the tab/box
 and the pet, so every other click goes straight through to the windows underneath.
 """
+import copy
+import hashlib
 import json
 import math
 import os
@@ -40,7 +42,10 @@ import sounds  # noqa: E402
 import music  # noqa: E402
 import termchat  # noqa: E402
 import themes  # noqa: E402
-import vehicles  # noqa: E402
+import vehicles
+import waybar  # noqa: E402
+import weather  # noqa: E402
+import updates  # noqa: E402
 import sprites  # noqa: E402
 import watch  # noqa: E402
 
@@ -145,12 +150,18 @@ class Larry(Gtk.Window):
         self.connect("destroy", Gtk.main_quit)
 
         self.cfg = config.load()
-        self.sprites = sprites.load(self.cfg)
-        self.fall_sprites = self.load_fall(self.cfg)
-        self.held_sprites = self.load_held(self.cfg)
-        self.typing_sprites = self.load_typing(self.cfg)
-        self.riding = self.load_riding(self.cfg)
-        self.poses = self.load_poses(self.cfg)
+        self.wear = {}            # what the weather has him wearing (weather.wear): baked into his sprites
+        self.weather = None       # the latest weather (weather.fetch), or None
+        self.weather_try = None   # the settings window's "Try it" (weather.SAMPLES key), or None
+        self.weather_timer = None
+        self.sprites = sprites.load(self.dress(self.cfg))
+        self.fall_sprites = self.load_fall(self.dress(self.cfg))
+        self.held_sprites = self.load_held(self.dress(self.cfg))
+        self.typing_sprites = self.load_typing(self.dress(self.cfg))
+        self.riding = self.load_riding(self.dress(self.cfg))
+        self.sheet_lock = threading.Lock()   # rebuilding those four after a settings change (queue_sheets)
+        self.sheet_token, self.sheet_job, self.sheet_busy = 0, None, False
+        self.poses = self.load_poses(self.dress(self.cfg))
         self.lw, self.lh = self.sprites[0].get_width(), self.sprites[0].get_height()
         self.anim = anim.Compiled(self.cfg["animation"])
         self.walking = False
@@ -158,6 +169,8 @@ class Larry(Gtk.Window):
         self.box_cache = scene.BoxCache()
         self.colors = theme_colors(self.cfg["theme"], self)
         self.theme_mtime = self._theme_mtime()
+        self.waybar_mtime = None          # (check_waybar: None so the first check looks)
+        self.bar_timer, self.bar_text, self.bar_cache, self.bar_look = None, None, None, None   # the Waybar icon
         self.config_mtime = self._config_mtime()
 
         self.open = 0.0           # box pull-down progress 0..1
@@ -193,12 +206,29 @@ class Larry(Gtk.Window):
         self.ride = None          # riding a vehicle: {"kind", "start", "until", "end", "dist", "alt", ...}
         self.next_ride = time.monotonic() + self.ride_gap()
         self.watcher = watch.Watcher(self.on_finished)
+        self.weather_checked = 0.0
+        self.schedule_peek()
+        GLib.timeout_add_seconds(45, self.check_updates)      # (then twice a day: see check_updates)
+        if not self.has_box:          # no box to live in: start out on the desktop
+            GLib.idle_add(lambda: self.mode == "box" and self.pop() and False)
+        GLib.idle_add(lambda: self.start_weather() and False)   # (Open-Meteo: only if it's turned on)
         self.clips = sounds.Clips(sprites.CACHE, lambda: self.cfg["pet_sounds"], lambda: self.cfg["volume"] / 100)
         threading.Thread(target=self.clips.prepare, daemon=True).start()   # so the first throw doesn't stutter
         self.streak = 0           # catch game: catches in a row
         self.best = self.load_best()
         self.toss = None          # {"from": y thrown at, "peak": highest y} while a throw is in the air
         self.popups = []          # floating "+1" / "New best!" texts: {"text", "x", "y", "start", "big"}
+        self.petting = False      # the middle button is held down (on him or his box): moving over him pets him
+        self.pet_prev = None      # last pointer spot while petting
+        self.pet_last = 0.0       # last stroke
+        self.pet_love = 0.0       # how much petting he's had just now (fades): enough and he flops over
+        self.pet_lean = 0.0       # leans into the strokes (-1 left .. 1 right)
+        self.pet_dist = 0.0       # stroke length since the last heart
+        self.flopped = False      # blissed out on his side
+        self.hearts = []          # floating hearts from petting: {"x", "y" (screen), "start", "drift"}
+        self.poofs = []           # puffs of smoke (popping out / back in): {"x", "y", "size", "start"}
+        self.pop_start = None     # when he last popped out (he bounces in from small)
+        self.peeking = None       # box closed: when he poked his head out from beside the tab (see peek_out)
         self.watcher.configure(self.cfg["reactions"]["packages"], self.cfg["reactions"]["downloads"])
         self.music = music.Music()
         self.music.configure(self.cfg["dance"]["enabled"], self.cfg["dance"]["beat"])
@@ -356,7 +386,14 @@ class Larry(Gtk.Window):
     def inside(p, r, pad=0):
         return p and r[0] - pad <= p[0] <= r[0] + r[2] + pad and r[1] - pad <= p[1] <= r[1] + r[3] + pad
 
+    @property
+    def has_box(self):
+        """The pull-down box and its tab are shown (off: just the pet, summoned from Waybar)."""
+        return self.cfg.get("box_tab", True)
+
     def hovering(self):
+        if not self.has_box:
+            return False
         if self.inside(self.pointer, self.to_edge(self.tab_rect(), 2)):
             return True
         return self.open > 0.05 and self.inside(self.pointer, self.to_edge(self.visible_box()))
@@ -366,8 +403,8 @@ class Larry(Gtk.Window):
         if self.mode == "drag":
             rects = [(0, 0, self.W, self.H)]  # keep getting motion wherever he's dragged
         else:
-            rects = [self.to_edge(self.tab_rect(), 5)]
-            if self.open > 0.05:
+            rects = [self.to_edge(self.tab_rect(), 5)] if self.has_box else []
+            if self.open > 0.05 and self.has_box:
                 rects.append(self.visible_box())
             if self.mode == "free" and (not self.room or self.room_shown):
                 rects.append(tuple(round(v) for v in self.hit_rect()))
@@ -388,6 +425,8 @@ class Larry(Gtk.Window):
             self.x, self.y = ev.x - self.drag_off[0], ev.y - self.drag_off[1]
             self.drag_hist = [h for h in self.drag_hist if ev.time - h[0] < 80] + [(ev.time, ev.x, ev.y)]
             self.damage_larry()
+        elif self.petting:
+            self.stroke(self.pointer)
         self.wake()
 
     def on_leave(self, _w, ev):
@@ -399,6 +438,11 @@ class Larry(Gtk.Window):
         p = (ev.x, ev.y)
         if ev.button == 3:
             self.open_settings()
+            return
+        if ev.button == 2:
+            if self.cfg["behavior"]["petting"] and self.mode != "drag":
+                self.petting, self.pet_prev = True, p
+                self.stroke(p)
             return
         if ev.button != 1:
             return
@@ -414,12 +458,15 @@ class Larry(Gtk.Window):
             self.drag_hist = [(ev.time, ev.x, ev.y)]
             self.mode, self.platform = "drag", None
             self.leave_room()
-        elif self.inside(p, self.tab_rect(), 4):
+        elif self.has_box and self.inside(p, self.tab_rect(), 4):
             self.pinned = not self.pinned
         self.update_input()
         self.wake()
 
     def on_release(self, _w, ev):
+        if ev.button == 2:
+            self.petting, self.pet_prev = False, None
+            return
         if ev.button != 1 or self.mode != "drag":
             return
         self.poked = time.monotonic()
@@ -700,6 +747,36 @@ class Larry(Gtk.Window):
         import settings
         self.settings = settings.Settings(self)
 
+    def queue_sheets(self, cfg):
+        """Rebuild the falling, held, typing and riding sprites on a worker thread (the first time
+        for new colours or a new size that's about a second of image work); the old ones stay in
+        use until the new ones are ready. Only the latest settings matter: older jobs are dropped."""
+        with self.sheet_lock:
+            self.sheet_token += 1
+            self.sheet_job = (self.sheet_token, copy.deepcopy(cfg))
+            if not self.sheet_busy:
+                self.sheet_busy = True
+                threading.Thread(target=self._sheet_worker, daemon=True).start()
+
+    def _sheet_worker(self):
+        while True:
+            with self.sheet_lock:
+                job, self.sheet_job = self.sheet_job, None
+                if job is None:
+                    self.sheet_busy = False
+                    return
+            token, cfg = job
+            res = (self.load_fall(cfg), self.load_held(cfg), self.load_typing(cfg), self.load_riding(cfg))
+            GLib.idle_add(self._sheets_ready, token, res)
+
+    def _sheets_ready(self, token, res):
+        if token == self.sheet_token:
+            self.damage_larry()
+            self.fall_sprites, self.held_sprites, self.typing_sprites, self.riding = res
+            self.damage_larry()
+            self.wake()
+        return False
+
     def set_config(self, cfg):
         """Swap in new settings live (called by the settings window)."""
         self.watcher.configure(cfg["reactions"]["packages"], cfg["reactions"]["downloads"])
@@ -710,19 +787,19 @@ class Larry(Gtk.Window):
                 self.end_ride()
             self.next_ride = time.monotonic() + cfg["ride"]["every"] * 60 * random.uniform(0.6, 1.4)
         self.anim = anim.Compiled(cfg["animation"])
-        sprite_keys = ("image", "size", "faces_left", "remove_bg", "outline", "accessories")
-        if any(cfg[k] != self.cfg[k] for k in ("image", "size", "outline", "fall_image", "accessories")):
-            self.fall_sprites = self.load_fall(cfg)
-            self.held_sprites = self.load_held(cfg)
+        weather_changed = cfg["weather"] != self.cfg["weather"]
+        box_changed = cfg["box_tab"] != self.cfg["box_tab"]
+        sprite_keys = ("image", "size", "faces_left", "remove_bg", "outline", "outline_color", "outline_width", "coat",
+                       "accessories")
+        if any(cfg[k] != self.cfg[k] for k in sprite_keys + ("fall_image",)):
+            self.queue_sheets(self.dress(cfg))   # the big drawn poses: in the background, so nothing freezes
         if any(cfg[k] != self.cfg[k] for k in sprite_keys):
-            self.poses = self.load_poses(cfg)
-            self.typing_sprites = self.load_typing(cfg)
-            self.riding = self.load_riding(cfg)
+            self.poses = self.load_poses(self.dress(cfg))
         if all(cfg[k] == self.cfg[k] for k in sprite_keys):
             new = self.sprites
         else:
             try:
-                new = sprites.load(cfg)
+                new = sprites.load(self.dress(cfg))
             except Exception as e:  # unreadable image: keep the current pet
                 print(f"larry: can't use {cfg['image']}: {e}", file=sys.stderr)
                 cfg = {**cfg, **{k: self.cfg[k] for k in sprite_keys}}
@@ -739,6 +816,16 @@ class Larry(Gtk.Window):
         self.wake()
         if theme_changed:
             self.recolor()
+        if weather_changed:
+            self.start_weather()
+        if box_changed:
+            self.pinned, self.hover_until = False, 0.0
+            self.damage_box()
+            self.input_key = None
+            self.update_input()
+            self.queue_draw()
+            if not cfg["box_tab"] and self.mode == "box":   # it's gone: out he comes
+                self.pop()
         if self.settings and self.settings.cfg != cfg:
             self.settings.sync(cfg)
 
@@ -759,8 +846,205 @@ class Larry(Gtk.Window):
         if self.settings:
             self.settings.restyle()
 
+    def status(self):
+        """What he's up to, for the Waybar module."""
+        now = time.monotonic()
+        if self.being_petted(now):
+            doing = "pet"
+        elif self.mode == "drag":
+            doing = "held"
+        elif self.mode == "free" and not self.platform:
+            doing = "fly"
+        elif self.ride:
+            doing = "ride"
+        elif self.reaction:
+            doing = self.reaction["mood"]
+        elif self.act in ("sleep", "sit", "dance", "type"):
+            doing = self.act
+        elif self.watching:
+            doing = "watch"
+        elif self.mode == "box":
+            doing = "box" if self.has_box else "away"
+        else:
+            doing = "walk"
+        where = ""
+        if self.mode == "free" and self.room:
+            where = "in your terminal"
+        elif self.mode == "free" and self.platform:
+            where = "on your desktop" if self.platform[0] == "floor" else "on a window"
+        return {"name": self.cfg["name"], "doing": doing, "where": where,
+                "vehicle": self.ride["kind"] if self.ride else None, "streak": self.streak, "best": self.best}
+
+    # ── the Waybar icon: a little square with his face, showing how he feels ───
+    BAR_PX = 72          # the icon's size (Waybar shrinks it to fit the bar; this keeps it sharp)
+    BAR_MOODS = {        # status -> (face, badge)
+        "pet": ("happy", "heart"), "happy": ("happy", "heart"), "dance": ("happy", "note"),
+        "sleep": ("sleep", "z"), "held": ("wide", "!"), "fly": ("wide", "!"), "sad": ("sad", "drop"),
+        "type": ("plain", "dots"), "ride": ("happy", None),
+    }
+
+    def update_bar_icon(self):
+        """Once a second while the Waybar module is on: redraw the icon if his mood changed, and
+        tell the module (waybar.NOW: the picture's path, then the tooltip)."""
+        if not self.cfg.get("waybar"):
+            self.bar_timer = None
+            return False
+        try:
+            st = self.status()
+            face, badge = self.BAR_MOODS.get(st["doing"], ("plain", None))
+            if self.bar_look is None or self.bar_look[0] is not self.sprites[0]:   # his look changed
+                self.bar_look = (self.sprites[0], sprites.sprite_key(self.dress(self.cfg)))
+            look = self.bar_look[1]
+            sig = f"{face}|{badge}|{look}|{tuple(self.colors['bg1'])}|{tuple(self.colors['accent2'])}"
+            path = waybar.ICONS / f"icon-{hashlib.sha1(sig.encode()).hexdigest()[:12]}.png"
+            if not path.exists():
+                waybar.ICONS.mkdir(parents=True, exist_ok=True)
+                self.render_bar_icon(face, badge).write_to_png(str(path))
+            text = f"{path}\n{waybar.tooltip(st)}"
+            if text != self.bar_text:
+                tmp = waybar.NOW.with_suffix(".tmp")
+                tmp.write_text(text)
+                tmp.replace(waybar.NOW)
+                self.bar_text = text
+        except Exception as e:   # never let the bar take the pet down
+            print(f"larry: waybar icon: {e}", file=sys.stderr)
+        return True
+
+    def bar_sprites(self):
+        """A sharper copy of his sprites for the icon (rebuilt when the pet changes)."""
+        if self.bar_cache is None or self.bar_cache[0] is not self.sprites[0]:
+            k = max(1.0, self.BAR_PX / (self.lh * 0.8))
+            dressed = self.dress(self.cfg)
+            poses = sprites.load_poses(dressed, k) if sprites.is_larry(self.cfg) else {}
+            self.bar_cache = (self.sprites[0], sprites.load(dressed, k)[0], poses)
+        return self.bar_cache[1], self.bar_cache[2]
+
+    def render_bar_icon(self, face, badge):
+        S = self.BAR_PX
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, S, S)
+        cr = cairo.Context(surf)
+        c = self.colors
+        r = S * 0.24
+        cr.new_sub_path()
+        cr.arc(S - r - 1, r + 1, r, -math.pi / 2, 0)
+        cr.arc(S - r - 1, S - r - 1, r, 0, math.pi / 2)
+        cr.arc(r + 1, S - r - 1, r, math.pi / 2, math.pi)
+        cr.arc(r + 1, r + 1, r, math.pi, 3 * math.pi / 2)
+        cr.close_path()
+        cr.set_source_rgb(*c["bg1"])
+        cr.fill_preserve()
+        cr.save()
+        cr.clip_preserve()
+        stand, poses = self.bar_sprites()
+        sprite, eyes = stand, None
+        if face == "sleep" and "sleep" in poses:
+            sprite = poses["sleep"][0]
+        elif face in ("happy", "sad", "wide") and "eyeless" in poses:
+            sprite, eyes = poses["eyeless"][0], poses["eyes"]
+        w, h = sprites.logical_size(sprite)
+        if poses:   # Larry: frame his head (where his eyes are), not the whole cow
+            ex = sum(e[0] for e in poses["eyes"]) / 2
+            ey = sum(e[1] for e in poses["eyes"]) / 2
+            sw, sh = sprites.logical_size(stand)
+            ey += h - sh                           # (lying down, his head is lower)
+            ph = self.cfg["size"] - 2 * sprites.PAD   # Larry himself, not his hat as well
+            side = ph * 0.82                       # his face (ears to muzzle) fills the square
+            k = S / side
+            ox, oy = S / 2 - (ex + ph * 0.06) * k, S * 0.5 - (ey + ph * 0.13) * k
+        else:        # anyone else: the whole picture, fitted in
+            k = S * 0.82 / max(w, h)
+            ox, oy = (S - w * k) / 2, S - 4 - h * k
+        cr.translate(ox, oy)
+        cr.scale(k, k)
+        cr.set_source_surface(sprite, 0, 0)
+        cr.paint()
+        if eyes:
+            cr.set_source_rgb(0, 0, 0)
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            for ex_, ey_, rx, ry in eyes:
+                rr = max(rx, 0.9) * 1.25
+                cr.new_path()
+                if face == "happy":                   # ^ ^
+                    cr.set_line_width(max(0.9, rr * 0.55))
+                    cr.arc(ex_, ey_ + rr * 0.5, rr, math.pi * 1.15, math.pi * 1.85)
+                    cr.stroke()
+                elif face == "sad":                   # eyes cast down
+                    cr.set_line_width(max(0.9, rr * 0.55))
+                    cr.arc(ex_, ey_ - rr * 0.6, rr, math.pi * 0.2, math.pi * 0.8)
+                    cr.stroke()
+                else:                                 # wide open: white ring, small pupil
+                    cr.arc(ex_, ey_, rr * 1.15, 0, 2 * math.pi)
+                    cr.set_source_rgb(1, 1, 1)
+                    cr.fill_preserve()
+                    cr.set_source_rgb(0, 0, 0)
+                    cr.set_line_width(max(0.7, rr * 0.3))
+                    cr.stroke()
+                    cr.arc(ex_, ey_, rr * 0.45, 0, 2 * math.pi)
+                    cr.fill()
+        cr.restore()
+        cr.set_source_rgba(*c["accent2"], 0.55)
+        cr.set_line_width(2)
+        cr.stroke()
+        if badge:
+            self.draw_badge(cr, S * 0.79, S * 0.21, S * 0.17, badge)
+        return surf
+
+    def draw_badge(self, cr, x, y, r, badge):
+        """The little emote in the icon's corner."""
+        cr.new_path()
+        cr.arc(x, y, r, 0, 2 * math.pi)
+        cr.set_source_rgb(1, 1, 1)
+        cr.fill_preserve()
+        cr.set_source_rgba(0.06, 0.06, 0.07, 0.85)
+        cr.set_line_width(r * 0.16)
+        cr.stroke()
+        if badge == "heart":
+            self.heart(cr, x, y + r * 0.08, r * 0.42, (0.95, 0.33, 0.45, 1))
+        elif badge == "note":
+            cr.save()
+            cr.translate(x, y)
+            cr.scale(r * 1.25, r * 1.25)
+            self.note_path(cr, 0)
+            cr.set_source_rgb(0.06, 0.06, 0.07)
+            cr.fill()
+            cr.restore()
+        elif badge == "drop":
+            cr.move_to(x, y - r * 0.6)
+            cr.curve_to(x + r * 0.55, y, x + r * 0.45, y + r * 0.55, x, y + r * 0.55)
+            cr.curve_to(x - r * 0.45, y + r * 0.55, x - r * 0.55, y, x, y - r * 0.6)
+            cr.set_source_rgb(0.35, 0.65, 0.98)
+            cr.fill()
+        elif badge == "dots":
+            for i in (-1, 0, 1):
+                cr.arc(x + i * r * 0.42, y, r * 0.13, 0, 2 * math.pi)
+                cr.set_source_rgb(0.06, 0.06, 0.07)
+                cr.fill()
+        else:   # "z", "!": a letter
+            cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            cr.set_font_size(r * 1.35)
+            e = cr.text_extents(badge)
+            cr.move_to(x - e.x_bearing - e.width / 2, y - e.y_bearing - e.height / 2)
+            cr.set_source_rgb(0.06, 0.06, 0.07)
+            cr.show_text(badge)
+
+    def check_waybar(self):
+        """With the Waybar module on: put it back if your Waybar config was rewritten without it
+        (a rice theme switch regenerates it, for one), and keep its icon up to date."""
+        if not self.cfg.get("waybar"):
+            return
+        if not self.bar_timer:
+            self.update_bar_icon()
+            self.bar_timer = GLib.timeout_add(1000, self.update_bar_icon)
+        m = waybar.config_mtime()
+        if m != self.waybar_mtime:
+            self.waybar_mtime = m
+            if m and not waybar.installed():
+                waybar.install()
+                self.waybar_mtime = waybar.config_mtime()
+
     def check_theme(self):
         """Every 2 s: pick up a rice theme switch, or a hand edit of the config file."""
+        self.check_waybar()
         m = self._theme_mtime()
         if m != self.theme_mtime:
             self.theme_mtime = m
@@ -830,7 +1114,7 @@ class Larry(Gtk.Window):
         # while you carry the pet, the box only opens when you bring it close (so it can be put away)
         if self.hovering() or (self.mode == "drag" and self.near_box(self.pointer)):
             self.hover_until = now + 0.45
-        want = 1.0 if (self.pinned or now < self.hover_until) else 0.0
+        want = 1.0 if self.has_box and (self.pinned or now < self.hover_until) else 0.0
         if self.open != want:
             self.damage_box()
             if self.mode == "box":
@@ -864,6 +1148,20 @@ class Larry(Gtk.Window):
         elif self.mode == "drag" and (self.fall_sprites or "dangle0" in self.poses):
             self.damage_larry()   # he flails / paddles while you hold him
 
+        if self.peeking is not None:
+            self.damage(*self.peek_rect())
+        if self.open > 0 and self.weather_effect():   # rain / snow keeps falling in the open box
+            self.damage_box()
+        if self.poofs:
+            for p_ in self.poofs:
+                self.damage(*self.poof_rect(p_))
+            self.poofs = [p_ for p_ in self.poofs if now - p_["start"] < self.POOF_TIME + 0.05]
+        if self.pop_start is not None:
+            self.damage_larry()
+        if self.hearts or self.pet_love or self.flopped:
+            self.update_petting(dt, now)
+            if self.being_petted(now) or self.flopped:
+                self.damage_larry()
         if self.popups:
             for p_ in self.popups:
                 self.damage(*self.popup_rect(p_))
@@ -873,11 +1171,395 @@ class Larry(Gtk.Window):
         self.flush_damage()
         self.update_input()
 
-        busy = self.open != want or self.open > 0 or self.mode in ("free", "drag") or self.popups
+        busy = (self.open != want or self.open > 0 or self.mode in ("free", "drag") or self.popups or self.hearts
+                or self.pet_love or self.poofs or self.pop_start is not None or self.peeking is not None)
         if not busy:
             self.ticking = None
             return False
         return True
+
+    # ── weather ─────────────────────────────────────────────────────────────
+    def dress(self, cfg):
+        """cfg with the weather's outfit added to his accessories (an umbrella hat stands in for
+        any hat he's wearing). Never saved: it comes and goes with the weather."""
+        if not self.wear:
+            return cfg
+        acc = dict(cfg["accessories"])
+        if "umbrella_hat" in self.wear:      # (your own hat pictures count too: see accessories.is_hat)
+            anchor = accessories.LARRY_ANCHOR if sprites.is_larry(cfg) else sprites.head_anchor(cfg)
+            acc = {k: v for k, v in acc.items() if not accessories.is_hat(k, v, anchor)}
+        for acc_id in self.wear:
+            acc[acc_id] = accessories.default_place(acc_id, sprites.head_anchor(cfg)) \
+                if not sprites.is_larry(cfg) else accessories.default_place(acc_id)
+        return {**cfg, "accessories": acc}
+
+    def weather_now(self):
+        """The weather that counts: the settings' "Try it", else the real thing (if it's on)."""
+        if self.weather_try:
+            return weather.SAMPLES[self.weather_try]
+        return self.weather if self.cfg["weather"]["enabled"] else None
+
+    def apply_weather(self):
+        """Dress for the weather now (rebuilding his sprites if the outfit changed)."""
+        w = self.weather_now()
+        wear = weather.wear(w) if w else {}
+        if wear != self.wear:
+            self.wear = wear
+            dressed = self.dress(self.cfg)
+            self.damage_larry()
+            self.sprites = sprites.load(dressed)
+            self.lw, self.lh = self.sprites[0].get_width(), self.sprites[0].get_height()
+            self.poses = self.load_poses(dressed)
+            self.queue_sheets(dressed)
+            self.queue_draw()
+            self.wake()
+            if self.settings:
+                self.settings.refresh()          # his size (and so the box's) may have changed
+        if self.settings:
+            self.settings.show_weather()
+
+    def check_weather(self, force=False):
+        """Every half hour (and when the place changes): ask Open-Meteo, on a worker thread."""
+        wc = self.cfg["weather"]
+        if not wc["enabled"] or not wc["place"]:
+            self.weather = None
+            self.apply_weather()
+            return True
+        lat, lon = wc["lat"], wc["lon"]
+
+        def work():
+            try:
+                w = weather.fetch(lat, lon)
+            except weather.WeatherError as e:
+                print(f"larry: weather: {e}", file=sys.stderr)
+                w = None
+            GLib.idle_add(done, w)
+
+        def done(w):
+            if w is not None or self.weather is None:
+                self.weather = w
+            self.weather_checked = time.monotonic()
+            self.apply_weather()
+            return False
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def start_weather(self):
+        if self.weather_timer:
+            GLib.source_remove(self.weather_timer)
+        self.weather_timer = GLib.timeout_add_seconds(weather.EVERY, self.check_weather)
+        self.check_weather()
+
+    def weather_effect(self):
+        w = self.weather_now()
+        return weather.effect(w) if w and (self.cfg["weather"]["effects"] or self.weather_try) else None
+
+    def draw_weather(self, cr, bx, by, bw, bh, t):
+        """Rain streaks or drifting snowflakes in the box (and the odd lightning flash)."""
+        fx = self.weather_effect()
+        if not fx:
+            return
+        cr.save()
+        if fx in ("rain", "storm"):
+            n = int(bw / 9)
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            cr.set_line_width(1.3)
+            for i in range(n):
+                sp = 260 + (i * 37) % 90                      # px a second
+                x = bx + (i * 97.3 % bw + t * sp * 0.18) % bw
+                y = by + (i * 53.7 % bh + t * sp) % (bh + 20) - 10
+                cr.move_to(x, y)
+                cr.line_to(x - 2.2, y + 9)
+                cr.set_source_rgba(0.72, 0.84, 1.0, 0.55 + 0.25 * (i % 3) / 2)
+                cr.stroke()
+            if fx == "storm":                                 # lightning now and then
+                ph = t % 7.3
+                if ph < 0.09 or 0.18 < ph < 0.24:
+                    cr.rectangle(bx, by, bw, bh)
+                    cr.set_source_rgba(1, 1, 1, 0.35)
+                    cr.fill()
+        else:
+            n = int(bw / 11)
+            for i in range(n):
+                sp = 22 + (i * 13) % 18
+                y = by + (i * 41.9 % bh + t * sp) % (bh + 10) - 5
+                x = bx + (i * 83.1 % bw + math.sin(t * 1.3 + i) * 6) % bw
+                r = 1.3 + (i % 3) * 0.5
+                cr.new_path()
+                cr.arc(x, y, r, 0, 2 * math.pi)
+                cr.set_source_rgba(1, 1, 1, 0.9)
+                cr.fill()
+        cr.restore()
+
+    def draw_box_inside(self, cr):
+        """What's in the open box: the weather, then him (if he's in there)."""
+        bx, by, bw, bh, _s = self.box_geom()
+        self.draw_weather(cr, bx, by, bw, bh, time.monotonic())
+        if self.mode == "box":
+            self.draw_larry(cr)
+
+    # ── peeking out of the closed box ───────────────────────────────────────
+    PEEK_UP, PEEK_HOLD, PEEK_DOWN = 0.45, 1.9, 0.28   # seconds: up, a look around, ducking back
+
+    def schedule_peek(self):
+        if getattr(self, "peek_timer", None):
+            GLib.source_remove(self.peek_timer)
+        self.peek_timer = GLib.timeout_add(int(random.uniform(25, 90) * 1000), self.peek_out)
+
+    def can_peek(self):
+        return (self.has_box and self.cfg["behavior"].get("peek", True) and self.mode == "box"
+                and self.open == 0 and not self.pinned and self.get_visible())
+
+    def peek_out(self):
+        """Now and then, with the box shut, he pokes his head out from behind the tab, has a look
+        round, and ducks back in."""
+        self.peek_timer = None
+        if self.can_peek():
+            self.peeking = time.monotonic()
+            self.damage(*self.peek_rect())
+            self.wake()
+        self.schedule_peek()
+        return False
+
+    def peek_frame(self):
+        """(where on the screen edge, rotation, how far up 0..1, tilt) for the peek now, or None."""
+        if self.peeking is None:
+            return None
+        t = time.monotonic() - self.peeking
+        total = self.PEEK_UP + self.PEEK_HOLD + self.PEEK_DOWN
+        if t >= total or not self.can_peek():
+            self.peeking = None
+            return None
+        if t < self.PEEK_UP:
+            p = t / self.PEEK_UP
+            up = 1 + 2.2 * (p - 1) ** 3 + 1.2 * (p - 1) ** 2     # pops up, a touch too far, settles
+        elif t < self.PEEK_UP + self.PEEK_HOLD:
+            up = 1.0
+        else:
+            up = 1 - ((t - self.PEEK_UP - self.PEEK_HOLD) / self.PEEK_DOWN) ** 2   # quick duck
+        h = t - self.PEEK_UP
+        tilt = 0.16 * math.sin(h * 3.2) * (1 if 0 < h < self.PEEK_HOLD else 0)   # looks one way, the other
+        tx, ty, tw, th = self.tab_rect()
+        gap = tw / 2 + self.lw * 0.45 + 8
+        edge = self.edge
+        along, room = (tx + tw / 2, self.W) if edge in ("top", "bottom") else (ty + th / 2, self.H)
+        if along + gap + self.lw * 0.6 > room:     # (tab near the end of the edge: peek out the other side)
+            gap = -gap
+        anchor = {"top": (tx + tw / 2 + gap, 0), "bottom": (tx + tw / 2 + gap, self.H),
+                  "left": (0, ty + th / 2 + gap), "right": (self.W, ty + th / 2 + gap)}[edge]
+        rot = {"bottom": 0.0, "top": math.pi, "left": math.pi / 2, "right": -math.pi / 2}[edge]
+        return anchor, rot, max(0.0, up), tilt
+
+    def peek_rect(self):
+        tx, ty, tw, th = self.tab_rect()
+        r = max(self.lw, self.lh) * 1.3 + tw
+        cx, cy = tx + tw / 2, ty + th / 2
+        return cx - r, cy - r, 2 * r, 2 * r
+
+    def draw_peek(self, cr):
+        f = self.peek_frame()
+        if not f:
+            return
+        (ax, ay), rot, up, tilt = f
+        sprite = self.sprites[0]
+        w, h = sprites.logical_size(sprite)
+        body = self.cfg["size"] - 2 * sprites.PAD      # (the picture's height without any hat on top)
+        show = ((h - body) + body * 0.4) * up          # how much of him is out: hat and head
+        hx = w * (0.68 if sprites.is_larry(self.cfg) else 0.5)   # his head's middle, across the picture
+        cr.save()
+        cr.translate(ax, ay)
+        cr.rotate(rot)
+        cr.rectangle(-w * 2, -h * 2, w * 4, h * 2)   # only what's past the screen edge shows
+        cr.clip()
+        cr.rotate(tilt)                                # (leaning from the edge, like peering round it)
+        cr.set_source_surface(sprite, -hx, -show)
+        cr.paint()
+        cr.restore()
+
+    # ── popping out (the Waybar icon's click) ───────────────────────────────
+    POOF_TIME = 0.6
+    POP_TIME = 0.42
+
+    def pop(self):
+        """Out of the box with a puff of smoke and a hop (from beside the Waybar icon), or, if
+        he's already out, poof back into the box."""
+        now = time.monotonic()
+        if self.mode == "drag":
+            return
+        if self.mode == "free" and not self.room:          # out already: back in he goes
+            x, y = self.larry_pos()
+            self.add_poof(x + self.lw / 2, y + self.lh * 0.55, self.lh)
+            self.stop_ride()
+            self.end_streak()
+            self.damage_larry()
+            self.mode, self.platform, self.vx, self.vy = "box", None, 0.0, 0.0
+            self.act, self.reaction = None, None
+            self.bx = (self.box_w - self.lw) / 2
+            self.peek(1.6)                                   # open up so you see him land
+            self.pop_start = now
+        else:                                                # in the box or a terminal: out!
+            self.leave_room()
+            self.stop_ride()
+            if self.typist:
+                self.typist.stop()
+                self.typist = None
+            self.end_streak()
+            bottom = waybar.bar_edge() == "bottom"
+            bx, by = 18, (self.H - 40 - self.lh) if bottom else 34   # right beside the icon
+            self.add_poof(bx + self.lw / 2, by + self.lh / 2, self.lh * 1.2)
+            self.mode, self.platform = "free", None
+            self.x, self.y = bx, by
+            self.vx, self.vy = 420.0, (-900.0 if bottom else -520.0)   # a hop out and away
+            self.dir = 1
+            self.act, self.reaction, self.watching = None, None, False
+            self.pop_start = now
+            self.refresh_platforms()
+            self.clips.weee(big=False, cow=sprites.is_larry(self.cfg))
+        self.poked = now
+        self.input_key = None
+        self.update_input()
+        self.queue_draw()
+        self.wake()
+
+    def add_poof(self, x, y, size):
+        self.poofs.append({"x": x, "y": y, "size": size, "start": time.monotonic()})
+
+    def poof_rect(self, p):
+        r = p["size"] * 1.4
+        return p["x"] - r, p["y"] - r, 2 * r, 2 * r
+
+    def draw_poofs(self, cr, now):
+        """Cartoon puffs: a ring of little clouds flying apart and shrinking away."""
+        for p in self.poofs:
+            k = (now - p["start"]) / self.POOF_TIME
+            if not 0 <= k < 1:
+                continue
+            size = p["size"]
+            for i in range(8):
+                a = i * math.pi / 4 + 0.3
+                d = size * (0.18 + 0.62 * (1 - (1 - k) ** 2))
+                r = size * 0.2 * (1 - k) ** 0.8 * (1.1 if i % 2 else 0.85)
+                cx, cy = p["x"] + math.cos(a) * d, p["y"] + math.sin(a) * d * 0.7
+                cr.new_path()
+                cr.arc(cx, cy, r, 0, 2 * math.pi)
+                cr.set_source_rgba(0.08, 0.08, 0.1, 0.55 * (1 - k))
+                cr.set_line_width(max(1.0, size * 0.03))
+                cr.stroke_preserve()
+                cr.set_source_rgba(1, 1, 1, 0.95 * (1 - k))
+                cr.fill()
+            if k < 0.25:                                     # a flash at the start
+                cr.new_path()
+                cr.arc(p["x"], p["y"], size * (0.25 + k * 1.6), 0, 2 * math.pi)
+                cr.set_source_rgba(1, 1, 1, 0.6 * (1 - k * 4))
+                cr.fill()
+
+    def pop_scale(self, now):
+        """Popping out: he springs from small to a bit too big and settles (1 when done)."""
+        if self.pop_start is None:
+            return 1.0
+        p = (now - self.pop_start) / self.POP_TIME
+        if p >= 1:
+            self.pop_start = None
+            return 1.0
+        p = max(p, 0.0)
+        return 1 + 2.4 * (p - 1) ** 3 + 1.4 * (p - 1) ** 2
+
+    # ── petting ─────────────────────────────────────────────────────────────
+    PET_FLOP = 10.0     # pet heights of stroking (without a break) before he flops over, blissed out
+    HEART_TIME = 1.3    # seconds a heart floats
+
+    def pettable(self):
+        if self.mode == "box":
+            return self.open > 0.6
+        return self.mode == "free" and bool(self.platform) and (not self.room or self.room_shown)
+
+    def stroke(self, p):
+        """The pointer moved over him with the middle button held: that's a pet."""
+        prev, self.pet_prev = self.pet_prev, p
+        if not prev or not self.pettable() or not self.inside(p, self.larry_rect(), 4):
+            return
+        dx, dy = p[0] - prev[0], p[1] - prev[1]
+        d = math.hypot(dx, dy)
+        if d < 0.5:
+            return
+        now = time.monotonic()
+        if not self.being_petted(now):       # a new petting session: drop whatever he was doing
+            self.stop_ride()
+            if self.typist:
+                self.typist.stop()
+                self.typist = None
+            self.act, self.watching, self.reaction, self.notes = None, False, None, []
+        self.pet_last = self.poked = self.cursor_moved = now
+        self.pet_love = min(self.pet_love + d / self.lh, self.PET_FLOP * 1.5)
+        self.pet_lean += (max(-1, min(1, dx / 6)) - self.pet_lean) * 0.25
+        self.pet_dist += d
+        if self.pet_dist > self.lh * 0.7:
+            self.pet_dist = 0
+            self.add_heart(p[0], p[1] - self.lh * 0.1)
+        if not self.flopped and self.pet_love >= self.PET_FLOP:
+            self.flopped = True
+            x, y = self.larry_pos()
+            for i in range(6):
+                self.add_heart(x + self.lw * (0.15 + 0.14 * i), y + self.lh * 0.3, delay=i * 0.06)
+            self.clips.play("moo-calf" if sprites.is_larry(self.cfg) else "love")
+        self.damage_larry()
+        self.wake()
+
+    def add_heart(self, x, y, delay=0.0):
+        self.hearts.append({"x": x, "y": y, "start": time.monotonic() + delay, "drift": random.uniform(-1, 1)})
+        self.hearts = self.hearts[-24:]
+
+    def being_petted(self, now):
+        return now - self.pet_last < (1.8 if self.flopped else 0.7)
+
+    def update_petting(self, dt, now):
+        if now - self.pet_last > 0.7:
+            self.pet_love = max(0.0, self.pet_love - dt * self.PET_FLOP / 3)
+            self.pet_lean *= max(0.0, 1 - dt * 4)
+        if self.flopped and not self.being_petted(now):
+            self.flopped = False
+            self.damage_larry()
+            self.pause = max(self.pause, 0.8)    # gets up, has a moment
+        for h in self.hearts:
+            self.damage(*self.heart_rect(h, now))
+        self.hearts = [h for h in self.hearts if now - h["start"] < self.HEART_TIME]
+
+    def heart_rect(self, h, now):
+        p = max(0.0, (now - h["start"]) / self.HEART_TIME)
+        x, y = self.heart_pos(h, p)
+        s = self.lh * 0.16
+        return x - s * 2.2, y - s * 2, s * 4.4, s * 3.4
+
+    def heart_pos(self, h, p):
+        return (h["x"] + h["drift"] * self.lh * 0.35 * p + math.sin(p * 8 + h["drift"] * 3) * 3,
+                h["y"] - p * self.lh * 0.85)
+
+    def draw_hearts(self, cr, now):
+        for h in self.hearts:
+            p = (now - h["start"]) / self.HEART_TIME
+            if not 0 <= p < 1:
+                continue
+            x, y = self.heart_pos(h, p)
+            s = self.lh * 0.075 * (0.6 + 0.6 * min(1, p * 4))
+            self.heart(cr, x, y, s, (0.95, 0.33, 0.45, min(1, p * 6) * (1 - p) ** 0.8))
+
+    def draw_petted(self, cr, x, y, side, t):
+        """Eyes shut happy, leaning into your hand; flopped on his side once he's had enough."""
+        if self.flopped and "sleep" in self.poses:
+            sprite = self.poses["sleep"][side]
+            tilt = 0.06 * math.sin(t * 5)              # a blissful little wriggle
+            sprites.draw_pet(cr, sprite, x + self.lw / 2, y + self.lh, tilt, 0, 0.04 * math.sin(t * 7))
+            return
+        stroking = t - self.pet_last < 0.25
+        tilt = self.pet_lean * 0.12 + (0.02 * math.sin(t * 9) if stroking else 0)
+        squash = 0.05 + (0.025 * math.sin(t * 11) if stroking else 0)
+        if self.flopped:                               # (pets without a lying-down pose) melt a bit more
+            squash += 0.06
+        if "eyeless" in self.poses:
+            sprites.draw_pet(cr, self.poses["eyeless"][side], x + self.lw / 2, y + self.lh, tilt, 0, squash,
+                             self.draw_mood_eyes)
+        else:
+            sprites.draw_pet(cr, self.sprites[side], x + self.lw / 2, y + self.lh, tilt, 0, squash)
 
     # ── vehicles ────────────────────────────────────────────────────────────
     RIDE_SCALE = 0.7    # vehicles (and him on them) are drawn this much smaller than he walks
@@ -995,11 +1677,22 @@ class Larry(Gtk.Window):
         """How high his head is when he's on it (in pet heights)."""
         if self.riding:
             frames, meta = self.riding
-            _w, h = sprites.logical_size(frames[0][0])
-            pad = sprites.PAD
-            return vehicles.SEAT[kind][1] + (pad + meta["seat"][1] * (h - 2 * pad)) / self.lh
+            _x, y = self.frame_point(frames[0][0], *meta["seat"])
+            return vehicles.SEAT[kind][1] + y / self.lh
         _dx, lift, scale = vehicles.RIDER[kind]
         return lift + scale
+
+    def halo(self):
+        """The vehicles' sticker outline, matching the pet's."""
+        return {"halo": self.cfg["outline"], "halo_rgb": tuple(v / 255 for v in sprites.rgb(self.cfg["outline_color"])),
+                "halo_px": float(sprites.outline_width(self.cfg))}
+
+    def frame_point(self, sprite, ax, ay):
+        """A point given as fractions of one of Larry's drawn frames -> px in the sprite (the frame
+        sits PAD in from the edges, more on the left, right and top with a wide outline)."""
+        w, h = sprites.logical_size(sprite)
+        p, e = sprites.PAD, sprites.grow(self.cfg)
+        return p + e + ax * (w - 2 * (p + e)), p + e + ay * (h - 2 * p - e)
 
     def ride_top(self, kind):
         return vehicles.top(kind, self.rider_head(kind))
@@ -1013,8 +1706,6 @@ class Larry(Gtk.Window):
         if self.riding:              # Larry: sitting in the seat
             frames, meta = self.riding
             sprite = frames[frame % len(frames)][0]
-            w, h = sprites.logical_size(sprite)
-            pad = sprites.PAD
             sx, sy = vehicles.SEAT[kind]
             if kind == "bike":       # his hooves on the pedals
                 ax, ay = meta["crank"]
@@ -1023,7 +1714,8 @@ class Larry(Gtk.Window):
                 ax, ay = meta["seat"]
             cr.translate(sx * L * s, -sy * L * s - bob)
             cr.scale(k, k)
-            cr.set_source_surface(sprite, -(pad + ax * (w - 2 * pad)), -(pad + ay * (h - 2 * pad)))
+            px, py = self.frame_point(sprite, ax, ay)
+            cr.set_source_surface(sprite, -px, -py)
             cr.paint()
         else:                        # anyone else: standing on it
             dx, lift, scale = vehicles.RIDER[kind]
@@ -1039,7 +1731,7 @@ class Larry(Gtk.Window):
             return 0.13
         frames, meta = self.riding
         _w, h = sprites.logical_size(frames[0][0])
-        return meta.get("pedal", 0.05) * (h - 2 * sprites.PAD) / self.lh
+        return meta.get("pedal", 0.05) * (h - 2 * sprites.PAD - sprites.grow(self.cfg)) / self.lh
 
     def update_ride(self, dt, now):
         r = self.ride
@@ -1108,7 +1800,7 @@ class Larry(Gtk.Window):
                 cr.translate(-vehicles.WHEELIE_PIVOT * L, 0)
             cr.scale(s, s)
             vehicles.draw(cr, kind, L, rider, t, r["dist"], moving,
-                          head=self.rider_head(kind), pedal=self.pedal_length(), halo=self.cfg["outline"])
+                          head=self.rider_head(kind), pedal=self.pedal_length(), **self.halo())
             cr.restore()
         else:                                 # all gone but the smoke: he's back on his feet
             sprites.draw_pet(cr, self.sprites[0 if self.dir > 0 else 1], cx, y + self.lh, 0, 0, 0)
@@ -1258,6 +1950,34 @@ class Larry(Gtk.Window):
             self.peek(self.REACT_TIME + 0.3)   # pop the box open so you can see
         self.wake()
 
+    def check_updates(self, force=False, done=None):
+        """Ask GitHub (on a worker thread) whether there's a newer version; the first time we hear
+        of one, say so. done(latest or error) for the settings window's "Check now"."""
+        if not self.cfg.get("updates", True) and not force:
+            GLib.timeout_add_seconds(updates.EVERY, self.check_updates)
+            return False
+
+        def work():
+            try:
+                res = updates.check(force)
+            except updates.UpdateError as e:
+                res = e
+            GLib.idle_add(finished, res)
+
+        def finished(res):
+            if not isinstance(res, Exception) and updates.newer(res["version"]) \
+                    and updates.should_announce(res["version"]):
+                self.on_finished("update", True, f"Update: v{res['version']} is out!")
+            if self.settings:
+                self.settings.show_update()
+            if done:
+                done(res)
+            return False
+        threading.Thread(target=work, daemon=True).start()
+        if not force:
+            GLib.timeout_add_seconds(updates.EVERY, self.check_updates)
+        return False
+
     def check_season(self):
         """Once per holiday: tell you there's something new to claim in the wardrobe."""
         season = accessories.new_season()
@@ -1295,7 +2015,7 @@ class Larry(Gtk.Window):
         cx, cy = x + w / 2, y + h / 2
         dist = math.hypot(self.cursor[0] - cx, self.cursor[1] - cy) if self.cursor else 1e9
         recent = now - self.cursor_moved < 2.0
-        if self.ride:
+        if self.ride or self.being_petted(now):
             return
         if self.act == "type":
             if recent and dist < self.WAKE_R:          # you're back: stop mid-sentence
@@ -1471,7 +2191,7 @@ class Larry(Gtk.Window):
     def wander(self, dt, speed):
         """Shared walking brain: occasional stops and turns. Returns dx for this frame."""
         a = self.anim
-        if self.act or self.watching or self.reaction:   # busy with something else: stay put
+        if self.act or self.watching or self.reaction or self.being_petted(time.monotonic()):   # busy: stay put
             self.walking, self.phase = False, 0
             return 0
         if self.ride:
@@ -1616,7 +2336,7 @@ class Larry(Gtk.Window):
 
         # the box (slides out from its edge)
         if self.open > 0:
-            pet = self.draw_larry if self.mode == "box" else None
+            pet = self.draw_box_inside if (self.mode == "box" or self.weather_effect()) else None
             cr.save()
             if stretch != 1:  # overshoot: stretch the box (and the pet in it) away from the edge
                 ax, ay = {"top": (0, 0), "bottom": (0, self.H), "left": (0, 0), "right": (self.W, 0)}[edge]
@@ -1627,24 +2347,36 @@ class Larry(Gtk.Window):
             cr.restore()
             self.draw_score(cr)
 
+        if self.peeking is not None and self.mode == "box":
+            self.draw_peek(cr)
+
         # the tab: rounded on the side away from the edge, grip dots along it
-        cr.save()
-        cr.translate(tx, ty)
-        scene.box_path(cr, tw, th, 6, edge)
-        cr.restore()
-        cr.set_source_rgba(*c["bg1"], 0.92)
-        cr.fill_preserve()
-        cr.set_source_rgba(*c["accent"], 0.55)
-        cr.set_line_width(1)
-        cr.stroke()
-        cr.set_source_rgba(*c["accent"], 0.9 if self.pinned else 0.6)
-        for i in (-6, 0, 6):
-            dx, dy = (i, 0) if edge in ("top", "bottom") else (0, i)
-            cr.arc(tx + tw / 2 + dx, ty + th / 2 + dy, 1.4, 0, 2 * math.pi)
+        if self.has_box:            # a soft little pill with a grip bar (accent while pinned open)
+            cr.save()
+            cr.translate(tx, ty)
+            scene.box_path(cr, tw, th, 7, edge)
+            cr.restore()
+            cr.set_source_rgba(*c["bg1"], 0.96)
+            cr.fill()
+            horiz = edge in ("top", "bottom")
+            gl, gw = (16, 3) if horiz else (3, 16)
+            gx, gy = tx + tw / 2 - gl / 2, ty + th / 2 - gw / 2
+            cr.new_sub_path()
+            r_ = 1.5
+            cr.arc(gx + gl - r_, gy + r_, r_, -math.pi / 2, 0)
+            cr.arc(gx + gl - r_, gy + gw - r_, r_, 0, math.pi / 2)
+            cr.arc(gx + r_, gy + gw - r_, r_, math.pi / 2, math.pi)
+            cr.arc(gx + r_, gy + r_, r_, math.pi, 3 * math.pi / 2)
+            cr.close_path()
+            cr.set_source_rgba(*(c["accent2"] if self.pinned else c["fg"]), 0.85 if self.pinned else 0.35)
             cr.fill()
 
         if self.mode != "box":
             self.draw_larry(cr)
+        if self.hearts:
+            self.draw_hearts(cr, time.monotonic())
+        if self.poofs:
+            self.draw_poofs(cr, time.monotonic())
         if self.popups:
             self.draw_popups(cr, time.monotonic())
 
@@ -1667,6 +2399,21 @@ class Larry(Gtk.Window):
         self._draw_larry(cr)
 
     def _draw_larry(self, cr):
+        s = self.pop_scale(time.monotonic())
+        if s != 1.0:
+            x, y = self.larry_pos()
+            cr.save()
+            cr.translate(x + self.lw / 2, y + self.lh * 0.6)
+            cr.scale(max(s, 0.02), max(s, 0.02))
+            cr.translate(-(x + self.lw / 2), -(y + self.lh * 0.6))
+            try:
+                self._draw_larry_now(cr)
+            finally:
+                cr.restore()
+            return
+        self._draw_larry_now(cr)
+
+    def _draw_larry_now(self, cr):
         x, y = self.larry_pos()
         airborne = self.mode == "drag" or (self.mode == "free" and not self.platform)
         if airborne and self.fall_sprites:   # arms up, wobbling
@@ -1696,6 +2443,9 @@ class Larry(Gtk.Window):
         if (self.mode == "drag" or (self.mode == "free" and not self.platform)) and "dangle0" in self.poses:
             n = sum(1 for k in self.poses if k.startswith("dangle"))   # held or flying: legs paddle
             sprite = self.poses[f"dangle{int(t * 11) % n}"][side]
+        if self.being_petted(t) and self.pettable():
+            self.draw_petted(cr, x, y, side, t)
+            return
         r = self.reaction
         if r:
             age = t - r["start"]
@@ -1763,7 +2513,7 @@ class Larry(Gtk.Window):
     def draw_mood_eyes(self, cr):
         """Happy ^ ^ eyes, or sad droopy ones, where Larry's eyes are."""
         w = sprites.logical_size(self.poses["eyeless"][0])[0]
-        happy = self.reaction["mood"] == "happy"
+        happy = not self.reaction or self.reaction["mood"] == "happy"   # (being petted: happy)
         cr.set_source_rgb(0, 0, 0)
         cr.set_line_cap(cairo.LINE_CAP_ROUND)
         for ex, ey, rx, ry in self.poses["eyes"]:
@@ -1909,8 +2659,16 @@ def main():
     def on_cmd(*_):
         conn, _addr = sock.accept()
         with conn:
-            if conn.recv(64).strip() == b"settings":
+            cmd = conn.recv(64).strip()
+            if cmd == b"settings":
                 pet.open_settings()
+            elif cmd == b"status":          # the Waybar module (waybar.py) asks once a second
+                try:
+                    conn.sendall(json.dumps(pet.status()).encode())
+                except OSError:
+                    pass
+            elif cmd in (b"pop", b"toggle"):   # its click: pop out of the box (or poof back in)
+                pet.pop()
         return True
 
     GLib.io_add_watch(sock.fileno(), GLib.IO_IN, on_cmd)
@@ -1923,6 +2681,7 @@ def main():
         Gtk.main()
     finally:
         pet.music.close()
+        waybar.blank()                         # the Waybar icon goes away with the pet
 
 
 if __name__ == "__main__":

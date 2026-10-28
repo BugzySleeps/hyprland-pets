@@ -28,7 +28,8 @@ ROOT = library.ROOT / "pets"
 EXT = ".larrypet"
 FORMAT = 1
 # what belongs to the pet (everything else, like the theme or the box, is yours)
-PET_KEYS = ("name", "size", "faces_left", "remove_bg", "outline", "accessories", "animation")
+PET_KEYS = ("name", "size", "faces_left", "remove_bg", "outline", "outline_color", "outline_width", "coat",
+            "accessories", "animation")
 SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
 MAX_FILES = 80
 MAX_FILE = 16 << 20          # bytes, uncompressed, per file
@@ -310,7 +311,8 @@ def install(path):
         # the same checks as the config file
         checked = config.parse({"name": name, "size": raw.get("size"), "faces_left": raw.get("faces_left"),
                                 "remove_bg": raw.get("remove_bg"), "outline": raw.get("outline"),
-                                "animation": raw.get("animation"), "accessories": acc})
+                                "outline_color": raw.get("outline_color"), "outline_width": raw.get("outline_width"),
+                                "coat": raw.get("coat"), "animation": raw.get("animation"), "accessories": acc})
         settings = {k: checked[k] for k in PET_KEYS}
         if not isinstance(raw.get("animation"), dict):
             settings["animation"] = {"preset": "Default", **anim.default()}

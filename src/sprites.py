@@ -20,6 +20,66 @@ LARRY_HELD = HERE / "larry-held.png"     # made by tools/make_falling_larry.py, 
 LARRY_TYPING = HERE / "larry-typing.png"
 LARRY_RIDING = HERE / "larry-riding.png"   # sitting on a vehicle, pedalling (+ seat / pedal points)
 LARRY_FALL_SCALE = 1.625  # upright with his arms up he's taller than standing; same head size
+# Larry's coat maps (also made by tools/make_falling_larry.py): red where his spots are, green where
+# the colours stay as drawn (his eyes, the keyboard). Everything else is skin or line work.
+COAT_MAPS = {p: p.with_name(p.stem + "-coat.png") for p in (LARRY, LARRY_FALLING, LARRY_HELD, LARRY_TYPING,
+                                                             LARRY_RIDING)}
+DEFAULT_COAT = {"skin": "#ffffff", "spots": "#000000", "lines": "#000000"}
+
+
+def rgb(hexstr):
+    h = hexstr.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def coat(cfg):
+    """(skin, spots, lines) RGB if Larry's colours were changed, else None."""
+    c = {**DEFAULT_COAT, **(cfg.get("coat") or {})}
+    if c == DEFAULT_COAT:
+        return None
+    return rgb(c["skin"]), rgb(c["spots"]), rgb(c["lines"])
+
+
+def lines(cfg):
+    return (coat(cfg) or (None, None, (0, 0, 0)))[2]
+
+
+def coat_tag(cfg):
+    """Cache key part: the colours, and when the coat maps last changed (so fixes to them show up)."""
+    c = coat(cfg)
+    if not c:
+        return ""
+    maps = max((p.stat().st_mtime for p in COAT_MAPS.values() if p.is_file()), default=0)
+    return "|coat-" + "".join(f"{v:02x}" for col in c for v in col) + f"-{maps}"
+
+
+def recolor(im, cmap, skin, spots, lines=(0, 0, 0)):
+    """Repaint one of Larry's pictures: how dark each pixel is says how much line (or spot) it is,
+    the rest is skin; the coat map says which dark bits are spots and what's left alone."""
+    r, g, _b, _a = cmap.convert("RGBA").split()
+    dark = ImageChops.invert(im.convert("L"))
+    ink = Image.composite(Image.new("RGB", im.size, spots), Image.new("RGB", im.size, lines), r)
+    out = Image.composite(ink, Image.new("RGB", im.size, skin), dark)
+    out = Image.composite(im.convert("RGB"), out, g).convert("RGBA")
+    out.putalpha(im.getchannel("A"))
+    return out
+
+
+def coat_map(path, cfg):
+    """The coat map to recolour this picture with, or None (not Larry's, or his usual colours)."""
+    cmap = COAT_MAPS.get(Path(path).resolve())
+    if coat(cfg) and cmap and cmap.is_file():
+        return Image.open(cmap).convert("RGBA")
+    return None
+
+
+def open_art(path, cfg):
+    """A picture as RGBA, in Larry's chosen colours if it's one of his and they were changed."""
+    im = Image.open(path).convert("RGBA")
+    cmap = coat_map(path, cfg)
+    if cmap:
+        im = recolor(im, cmap, *coat(cfg))
+    return im
 
 
 def remove_background(im, tolerance=48):
@@ -41,12 +101,13 @@ def remove_background(im, tolerance=48):
 def base(cfg, height):
     """The pet alone, facing right, `height` px tall (background removed, cropped). Cached as a PNG."""
     src = Path(cfg["image"])
-    sig = f"{src.resolve()}|{src.stat().st_mtime}|{height}|{cfg['faces_left']}|{cfg['remove_bg']}"
+    tag = coat_tag(cfg) if src.resolve() in COAT_MAPS else ""
+    sig = f"{src.resolve()}|{src.stat().st_mtime}|{height}|{cfg['faces_left']}|{cfg['remove_bg']}{tag}"
     path = CACHE / f"{hashlib.sha1(sig.encode()).hexdigest()[:16]}-base.png"
     if path.exists():
         return path
     CACHE.mkdir(parents=True, exist_ok=True)
-    im = Image.open(src).convert("RGBA")
+    im = open_art(src, cfg)
     if im.height > height * 8:  # work at a sane size; flood fill is per-pixel Python
         im = im.resize((max(1, round(im.width * height * 8 / im.height)), height * 8), Image.LANCZOS)
     if cfg["remove_bg"]:
@@ -129,11 +190,42 @@ def composite(cfg, edit_pet=None):
     return to_pil(surf), ox, oy, pw, ph
 
 
-def sticker(sprite, cfg):
+OUTLINE_MIN, OUTLINE_MAX = 1, 8   # sticker outline width, px
+
+
+def outline_width(cfg):
+    return max(OUTLINE_MIN, min(OUTLINE_MAX, int(cfg.get("outline_width", 2))))
+
+
+def grow(cfg, scale=1):
+    """How much a sticker outline wider than the PAD margin grows the sprite, on its left, right and
+    top (not under the feet: they stand on things)."""
+    if not cfg.get("outline", True):
+        return 0
+    return max(0, round((outline_width(cfg) + 2 - PAD) * scale))
+
+
+def outline_tag(cfg):
+    return f"{cfg['outline']}{cfg.get('outline_color', '#ffffff')}{outline_width(cfg)}"
+
+
+def sticker(sprite, cfg, scale=1):
+    """The sticker outline: the picture's shape, grown and filled with the outline colour, behind it."""
     if not cfg["outline"]:
         return sprite
-    halo = sprite.getchannel("A").filter(ImageFilter.MaxFilter(5))
-    out = Image.new("RGBA", sprite.size, (255, 255, 255, 0))
+    e = grow(cfg, scale)
+    if e:
+        big = Image.new("RGBA", (sprite.width + 2 * e, sprite.height + e), (0, 0, 0, 0))
+        big.alpha_composite(sprite, (e, e))
+        sprite = big
+    w = max(1, round(outline_width(cfg) * scale))
+    alpha = sprite.getchannel("A")
+    if w <= 2:
+        halo = alpha.filter(ImageFilter.MaxFilter(2 * w + 1))
+    else:                       # wider: grow it round rather than square (blur, then a soft threshold
+        halo = alpha.filter(ImageFilter.GaussianBlur(w / 1.7))   # that lands about w px out)
+        halo = halo.point(lambda v: 0 if v < 4 else 255 if v > 20 else (v - 4) * 16)
+    out = Image.new("RGBA", sprite.size, (*rgb(cfg.get("outline_color", "#ffffff")), 0))
     out.putalpha(halo)
     out.alpha_composite(sprite)
     return out
@@ -141,17 +233,17 @@ def sticker(sprite, cfg):
 
 def sprite_key(cfg, extra=""):
     basep = base(cfg, cfg["size"] - 2 * PAD)
-    sig = f"{basep.name}|{cfg['outline']}|{accessories.signature(cfg.get('accessories', {}))}{extra}"
+    sig = f"{basep.name}|{outline_tag(cfg)}|{accessories.signature(cfg.get('accessories', {}))}{extra}"
     return hashlib.sha1(sig.encode()).hexdigest()[:16]
 
 
-def build(cfg):
+def build(cfg, scale=1):
     """Render the sprite pair as PNGs in the cache (reused until a setting or the image changes)."""
     key = sprite_key(cfg)
     out = CACHE / f"{key}-right.png", CACHE / f"{key}-left.png"
     if all(p.exists() for p in out):
         return out
-    sprite = sticker(composite(cfg)[0], cfg)
+    sprite = sticker(composite(cfg)[0], cfg, scale)
     sprite.save(out[0])
     sprite.transpose(Image.FLIP_LEFT_RIGHT).save(out[1])
     return out
@@ -160,7 +252,7 @@ def build(cfg):
 def load(cfg, scale=1):
     """[facing right, facing left] cairo surfaces. scale > 1 renders a sharper copy for a zoomed
     preview; it still measures (and paints) in normal pixels thanks to the device scale."""
-    paths = build({**cfg, "size": round(cfg["size"] * scale)} if scale != 1 else cfg)
+    paths = build({**cfg, "size": round(cfg["size"] * scale)} if scale != 1 else cfg, scale)
     surfaces = [cairo.ImageSurface.create_from_png(str(p)) for p in paths]
     if scale != 1:
         for surf in surfaces:
@@ -180,8 +272,8 @@ def is_larry(cfg):
     return Path(cfg["image"]).resolve() == LARRY and not cfg.get("faces_left")
 
 
-def seal_bottom(im, depth):
-    """Black along the bottom of every opaque column (cut-off legs read as tucked hooves)."""
+def seal_bottom(im, depth, colour=(0, 0, 0)):
+    """Line colour along the bottom of every opaque column (cut-off legs read as tucked hooves)."""
     a = im.getchannel("A").load()
     px = im.load()
     w, h = im.size
@@ -190,7 +282,7 @@ def seal_bottom(im, depth):
             if a[x, y] > 128:
                 for yy in range(max(0, y - depth), y + 1):
                     if a[x, yy]:
-                        px[x, yy] = (0, 0, 0, a[x, yy])
+                        px[x, yy] = (*colour, a[x, yy])
                 break
     return im
 
@@ -203,18 +295,19 @@ def pose_maps(cfg, eyes=None):
     if eyes:
         def edit(pet):
             k = pet.width / (bx1 - bx0)
-            paint_out_eyes(pet, lambda x, y: ((x - bx0) * k, (y - by0) * k), k, eyes == "closed")
+            paint_out_eyes(pet, lambda x, y: ((x - bx0) * k, (y - by0) * k), k, eyes == "closed",
+                           (coat(cfg) or ((255, 255, 255),))[0])
     im, ox, oy, pw, ph = composite(cfg, edit)
     k = pw / (bx1 - bx0)
     return im, (lambda x, y: (ox + (x - bx0) * k, oy + (y - by0) * k)), k, oy + ph
 
 
-def paint_out_eyes(im, at, k, closed):
+def paint_out_eyes(im, at, k, closed, skin=(255, 255, 255)):
     d = ImageDraw.Draw(im)
     for x0, y0, x1, y1 in LARRY_EYES:
         (X0, Y0), (X1, Y1) = at(x0, y0), at(x1, y1)
         pad = 3 * k
-        d.ellipse((X0 - pad, Y0 - pad, X1 + pad, Y1 + pad), fill=(255, 255, 255, 255))
+        d.ellipse((X0 - pad, Y0 - pad, X1 + pad, Y1 + pad), fill=(*skin, 255))
         if closed:   # a little downward curve: asleep
             cy, rx = (Y0 + Y1) / 2, (X1 - X0) / 2
             d.arc((X0 - pad, cy - rx * 0.9, X1 + pad, cy + rx * 0.9), 20, 160, fill=(0, 0, 0, 255),
@@ -226,7 +319,7 @@ def pose_sleep(cfg):
     cut = round(at(0, LARRY_BELLY)[1])
     out = Image.new("RGBA", im.size, (0, 0, 0, 0))
     out.alpha_composite(im.crop((0, 0, im.width, cut)), (0, feet - cut))   # lie down: belly on the ground
-    return seal_bottom(out, max(1, round(9 * k)))
+    return seal_bottom(out, max(1, round(9 * k)), lines(cfg))
 
 
 def pose_sit(cfg):
@@ -243,7 +336,7 @@ def pose_sit(cfg):
     half = math.ceil(max(im.width / 2, cx - x0 + PAD, x1 - cx + PAD))
     top = min(y0 - PAD, y1 + PAD - im.height)
     out = big.crop((round(cx - half), top, round(cx + half), y1 + PAD))
-    return seal_bottom(out, max(1, round(9 * k)))
+    return seal_bottom(out, max(1, round(9 * k)), lines(cfg))
 
 
 # held without the falling pose: his legs paddle in the air (larry.png pixels)
@@ -294,10 +387,12 @@ EYEWEAR = {"sunglasses", "glasses"}   # with these on, his eyes don't follow the
 def eye_spots(cfg, scale=1):
     """Larry's eyes in the right-facing sprite, logical px: [(cx, cy, rx, ry), ...] (far eye first)."""
     _im, at, _k, _feet = pose_maps({**cfg, "size": round(cfg["size"] * scale)} if scale != 1 else cfg)
+    e = grow(cfg, scale)          # a wide outline moves him right and down in his sprite
     spots = []
     for x0, y0, x1, y1 in LARRY_EYES:
         (X0, Y0), (X1, Y1) = at(x0, y0), at(x1, y1)
-        spots.append(((X0 + X1) / 2 / scale, (Y0 + Y1) / 2 / scale, (X1 - X0) / 2 / scale, (Y1 - Y0) / 2 / scale))
+        spots.append(((X0 + X1) / 2 / scale + e / scale, (Y0 + Y1) / 2 / scale + e / scale,
+                      (X1 - X0) / 2 / scale, (Y1 - Y0) / 2 / scale))
     return spots
 
 
@@ -318,7 +413,7 @@ def load_poses(cfg, scale=1):
         key = sprite_key(c, "|pose-" + name + "-1")
         out = CACHE / f"{key}-{name}-right.png", CACHE / f"{key}-{name}-left.png"
         if not all(p.exists() for p in out):
-            sprite = sticker(make(c), c)
+            sprite = sticker(make(c), c, scale)
             sprite.save(out[0])
             sprite.transpose(Image.FLIP_LEFT_RIGHT).save(out[1])
         surfaces = [cairo.ImageSurface.create_from_png(str(p)) for p in out]
@@ -348,14 +443,14 @@ def load_fall(cfg, scale=1):
     src = fall_source(cfg)
     if not src:
         return None
-    sub = {"image": str(src), "faces_left": False, "remove_bg": not has_transparency(src)}
+    sub = {"image": str(src), "faces_left": False, "remove_bg": not has_transparency(src), "coat": cfg.get("coat")}
     k = LARRY_FALL_SCALE if src == LARRY_FALLING else 1
     basep = base(sub, round((cfg["size"] - 2 * PAD) * k * scale))
     items = cfg.get("accessories", {}) if src == LARRY_FALLING else {}
     meta_path = LARRY_FALLING.with_suffix(".json")
     if items and not meta_path.is_file():
         items = {}
-    sig = f"{basep.name}|{cfg['outline']}|fall" + ("|acc-" + acc_tag(items) if items else "")
+    sig = f"{basep.name}|{outline_tag(cfg)}|fall" + ("|acc-" + acc_tag(items) if items else "")
     key = hashlib.sha1(sig.encode()).hexdigest()[:16]
     out = CACHE / f"{key}-fall-right.png", CACHE / f"{key}-fall-left.png"
     if not all(p.exists() for p in out):
@@ -366,7 +461,7 @@ def load_fall(cfg, scale=1):
         pad = round(PAD * scale)
         sprite = Image.new("RGBA", (pet.width + 2 * pad, pet.height + 2 * pad), (255, 255, 255, 0))
         sprite.alpha_composite(pet, (pad, pad))
-        sprite = sticker(sprite, cfg)
+        sprite = sticker(sprite, cfg, scale)
         sprite.save(out[0])
         sprite.transpose(Image.FLIP_LEFT_RIGHT).save(out[1])
     surfaces = [cairo.ImageSurface.create_from_png(str(p)) for p in out]
@@ -429,23 +524,26 @@ def load_sheet(cfg, sheet, tag, scale=1, decorate=None):
     meta = json.loads(sheet.with_suffix(".json").read_text())
     n, fw, fh = meta["frames"], meta["frame_w"], meta["frame_h"]
     height = round((cfg["size"] - 2 * PAD) * meta["scale"] * scale)
-    key = hashlib.sha1(f"{sheet.stat().st_mtime}|{height}|{cfg['outline']}|{tag}".encode()).hexdigest()[:16]
+    key = hashlib.sha1(f"{sheet.stat().st_mtime}|{height}|{outline_tag(cfg)}|{tag}{coat_tag(cfg)}".encode()).hexdigest()[:16]
     img = None
     frames = []
     for i in range(n):
         out = CACHE / f"{key}-{tag}{i}-right.png", CACHE / f"{key}-{tag}{i}-left.png"
         if not all(p.exists() for p in out):
             if img is None:
-                img = Image.open(sheet).convert("RGBA")
+                img, cmap = Image.open(sheet).convert("RGBA"), coat_map(sheet, cfg)
                 CACHE.mkdir(parents=True, exist_ok=True)
-            frame = img.crop((i * fw, 0, (i + 1) * fw, fh))
-            frame = frame.resize((max(1, round(fw * height / fh)), height), Image.LANCZOS)
+            box = (i * fw, 0, (i + 1) * fw, fh)
+            size = (max(1, round(fw * height / fh)), height)
+            frame = img.crop(box).resize(size, Image.LANCZOS)
+            if cmap:                  # recolour at pet size: far less work than the whole sheet
+                frame = recolor(frame, cmap.crop(box).resize(size, Image.BILINEAR), *coat(cfg))
             if decorate:
                 frame = decorate(frame)
             pad = round(PAD * scale)
             sprite = Image.new("RGBA", (frame.width + 2 * pad, frame.height + 2 * pad), (255, 255, 255, 0))
             sprite.alpha_composite(frame, (pad, pad))
-            sprite = sticker(sprite, cfg)
+            sprite = sticker(sprite, cfg, scale)
             sprite.save(out[0])
             sprite.transpose(Image.FLIP_LEFT_RIGHT).save(out[1])
         surfaces = [cairo.ImageSurface.create_from_png(str(p)) for p in out]

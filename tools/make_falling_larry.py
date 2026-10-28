@@ -10,6 +10,9 @@
   src/larry-riding.png    sitting on a vehicle, side on: front legs reaching forward to the handlebars,
                           back legs pedalling (8 frames, one turn of the pedals; + larry-riding.json,
                           which also says where his seat and the pedals' middle are in the frame)
+  src/larry*-coat.png     a coat map for each picture above (and larry.png): red where his spots are,
+                          green where the colours are left alone (his eyes, the keyboard), so
+                          sprites.py can recolour his skin, spots and lines
 
 His head is cut from the original drawing; body, arms, legs, hooves and tail are drawn here in
 the same style (thick black outline, white fill). Run it again after changing anything below.
@@ -20,7 +23,7 @@ import sys
 from pathlib import Path
 
 import cairo
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 LW = 11          # outline width, matching the drawing
@@ -54,6 +57,48 @@ THIGH, SHIN = 175, 160
 RIDE_ARM_FAR = [(330, 475), (440, 555), (530, 560), (590, 532)]
 RIDE_ARM_NEAR = [(440, 470), (520, 548), (575, 545), (622, 518)]
 RIDE_FRAMES = 8
+LARRY_EYES = ((371, 149, 384, 161), (313, 173, 341, 198))   # (as in sprites.py) never part of a spot
+
+MODE = "art"     # "art" draws Larry; "coat" draws his coat map (see coat_colour)
+ART = {"ink": (0, 0, 0), "skin": (1, 1, 1), "spot": (0, 0, 0), "spot_leg": (0.03, 0.03, 0.03)}
+COAT = {"ink": (0, 0, 0), "skin": (0, 0, 0), "spot": (1, 0, 0), "spot_leg": (1, 0, 0), "keep": (0, 1, 0)}
+
+
+def src(cr, kind, art=None):
+    """Set the colour for a part of him: its real colour, or its coat-map colour."""
+    cr.set_source_rgb(*(COAT[kind] if MODE == "coat" else (art or ART[kind])))
+
+
+def larry_coat():
+    """larry.png's coat map: his spots are the big filled black areas (his back spot, the far legs,
+    his muzzle); thin black lines are the outline, and the eyes are never spots."""
+    im = Image.open(SRC / "larry.png").convert("RGBA")
+    w, h = im.size
+    alpha = im.getchannel("A").point(lambda v: 255 if v > 128 else 0)
+    dark = ImageChops.multiply(im.convert("L").point(lambda v: 255 if v < 110 else 0), alpha)
+
+    def morph(m, n, f):
+        for _ in range(n):
+            m = m.filter(f(3))
+        return m
+    opened = morph(morph(dark, 6, ImageFilter.MinFilter), 6, ImageFilter.MaxFilter)   # lines gone
+    seeds = morph(morph(dark, 11, ImageFilter.MinFilter), 30, ImageFilter.MaxFilter)  # only big areas
+    spots = ImageChops.multiply(opened, seeds)
+    d = ImageDraw.Draw(spots)
+    for x0, y0, x1, y1 in LARRY_EYES:
+        d.ellipse((x0 - 8, y0 - 8, x1 + 8, y1 + 8), fill=0)
+    spots = ImageChops.multiply(morph(spots, 2, ImageFilter.MaxFilter), dark.filter(ImageFilter.MaxFilter(3)))
+    # his outer edge keeps its black outline (where a spot meets the outline, e.g. beside his muzzle)
+    spots = ImageChops.multiply(spots, morph(alpha, LW + 3, ImageFilter.MinFilter))
+    spots = spots.filter(ImageFilter.GaussianBlur(1))
+    eyes = Image.new("L", im.size, 0)            # his eyes stay black whatever colour his lines are
+    d = ImageDraw.Draw(eyes)
+    for x0, y0, x1, y1 in LARRY_EYES:
+        d.ellipse((x0 - 4, y0 - 4, x1 + 4, y1 + 4), fill=255)
+    eyes = ImageChops.multiply(eyes.filter(ImageFilter.GaussianBlur(1)), dark.filter(ImageFilter.MaxFilter(3)))
+    black = Image.new("L", im.size, 0)
+    coat = Image.merge("RGBA", (spots, eyes, black, im.getchannel("A")))
+    return coat
 
 
 def T(p):
@@ -71,15 +116,15 @@ def path(cr, pts):
                     p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6, *p2)
 
 
-def limb(cr, pts, fill=(1, 1, 1), hoof=20):
+def limb(cr, pts, dark=False, hoof=20):
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
     cr.set_line_join(cairo.LINE_JOIN_ROUND)
     path(cr, pts)
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "ink")
     cr.set_line_width(LIMB + 2 * LW)
     cr.stroke()
     path(cr, pts)
-    cr.set_source_rgb(*fill)
+    src(cr, "spot_leg" if dark else "skin")
     cr.set_line_width(LIMB)
     cr.stroke()
     (x1, y1), (x2, y2) = T(pts[-2]), T(pts[-1])        # hoof: the last bit, black
@@ -87,7 +132,7 @@ def limb(cr, pts, fill=(1, 1, 1), hoof=20):
     ux, uy = (x2 - x1) / d, (y2 - y1) / d
     cr.move_to(x2 - ux * hoof, y2 - uy * hoof)
     cr.line_to(x2 + ux * 4, y2 + uy * 4)
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "ink")
     cr.set_line_width(LIMB + 2 * LW + 4)
     cr.set_line_cap(cairo.LINE_CAP_BUTT)
     cr.stroke()
@@ -96,7 +141,7 @@ def limb(cr, pts, fill=(1, 1, 1), hoof=20):
 
 
 def head_surface():
-    im = Image.open(SRC / "larry.png").convert("RGBA")
+    im = larry_coat() if MODE == "coat" else Image.open(SRC / "larry.png").convert("RGBA")
     mask = Image.new("L", im.size, 0)
     ImageDraw.Draw(mask).polygon(HEAD_CUT, fill=255)
     im.putalpha(ImageChops.multiply(im.getchannel("A"), mask))
@@ -126,7 +171,7 @@ def render(legs=(LEG_L, LEG_R), arms=(ARM_L, ARM_R)):
     cr = cairo.Context(surf)
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
     path(cr, TAIL)
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "ink")
     cr.set_line_width(12)
     cr.stroke()
     x, y = T((150, 795))
@@ -136,16 +181,16 @@ def render(legs=(LEG_L, LEG_R), arms=(ARM_L, ARM_R)):
         cr.set_line_width(13)
         cr.stroke()
     limb(cr, legs[0])
-    limb(cr, legs[1], fill=(0.03, 0.03, 0.03))
+    limb(cr, legs[1], dark=True)
     limb(cr, arms[0])
     limb(cr, arms[1])
     path(cr, TORSO)
     cr.close_path()
-    cr.set_source_rgb(1, 1, 1)
+    src(cr, "skin")
     cr.fill_preserve()
     cr.save()
     cr.clip()
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "spot")
     for spot in SPOTS:
         path(cr, spot)
         cr.close_path()
@@ -153,7 +198,7 @@ def render(legs=(LEG_L, LEG_R), arms=(ARM_L, ARM_R)):
     cr.restore()
     path(cr, TORSO)
     cr.close_path()
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "ink")
     cr.set_line_width(LW)
     cr.stroke()
     hs, _keep = head_surface()
@@ -175,9 +220,9 @@ def keyboard(cr):
         cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
         cr.close_path()
     rrect(x0, y0, x1 - x0, y1 - y0, 12)
-    cr.set_source_rgb(0.22, 0.23, 0.26)
+    src(cr, "keep", (0.22, 0.23, 0.26))
     cr.fill_preserve()
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "ink")
     cr.set_line_width(LW)
     cr.stroke()
     cols, rows = 10, 3
@@ -186,10 +231,10 @@ def keyboard(cr):
     for r in range(rows):
         for c in range(cols):
             rrect(x0 + 12 + c * kw + 2, y0 + 9 + r * kh + 2, kw - 4, kh - 4, 3)
-            cr.set_source_rgb(0.86, 0.87, 0.9)
+            src(cr, "keep", (0.86, 0.87, 0.9))
             cr.fill()
     rrect(x0 + 12 + 2.5 * kw, y0 + 9 + rows * kh + 2, 5 * kw, kh - 4, 3)    # space bar
-    cr.set_source_rgb(0.86, 0.87, 0.9)
+    src(cr, "keep", (0.86, 0.87, 0.9))
     cr.fill()
 
 
@@ -207,7 +252,7 @@ def render_typing(left_up, right_up):
     cr = cairo.Context(surf)
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
     path(cr, [(250, 690), (190, 730), (150, 770), (120, 790)])   # tail, lying on the ground
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "ink")
     cr.set_line_width(12)
     cr.stroke()
     x, y = T((120, 790))
@@ -217,14 +262,14 @@ def render_typing(left_up, right_up):
         cr.set_line_width(13)
         cr.stroke()
     limb(cr, SIT_LEG_L)
-    limb(cr, SIT_LEG_R, fill=(0.03, 0.03, 0.03))
+    limb(cr, SIT_LEG_R, dark=True)
     path(cr, TORSO)
     cr.close_path()
-    cr.set_source_rgb(1, 1, 1)
+    src(cr, "skin")
     cr.fill_preserve()
     cr.save()
     cr.clip()
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "spot")
     for spot in SPOTS:
         path(cr, spot)
         cr.close_path()
@@ -232,7 +277,7 @@ def render_typing(left_up, right_up):
     cr.restore()
     path(cr, TORSO)
     cr.close_path()
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "ink")
     cr.set_line_width(LW)
     cr.stroke()
     keyboard(cr)
@@ -261,7 +306,7 @@ def render_riding(angle):
     cr = cairo.Context(surf)
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
     path(cr, [(250, 680), (200, 700), (170, 740), (160, 790)])   # tail hanging off the back
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "ink")
     cr.set_line_width(12)
     cr.stroke()
     x, y = T((160, 790))
@@ -277,11 +322,11 @@ def render_riding(angle):
     limb(cr, RIDE_ARM_FAR)
     path(cr, TORSO)
     cr.close_path()
-    cr.set_source_rgb(1, 1, 1)
+    src(cr, "skin")
     cr.fill_preserve()
     cr.save()
     cr.clip()
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "spot")
     for spot in SPOTS:
         path(cr, spot)
         cr.close_path()
@@ -289,10 +334,10 @@ def render_riding(angle):
     cr.restore()
     path(cr, TORSO)
     cr.close_path()
-    cr.set_source_rgb(0, 0, 0)
+    src(cr, "ink")
     cr.set_line_width(LW)
     cr.stroke()
-    limb(cr, bent_leg(RIDE_HIPS[1], near), fill=(0.03, 0.03, 0.03))   # near side: in front
+    limb(cr, bent_leg(RIDE_HIPS[1], near), dark=True)   # near side: in front
     limb(cr, RIDE_ARM_NEAR)
     hs, _keep = head_surface()
     cr.set_source_surface(hs, *HEAD_AT)
@@ -315,13 +360,18 @@ def box_in(rect, box):
             round((rect[2] - box[0]) / fw, 4), round((rect[3] - box[1]) / fh, 4)]
 
 
-def save_sheet(frames, name, out, fall_box, points=None, lengths=None, rects=None):
-    boxes = [f.getchannel("A").getbbox() for f in frames]
-    box = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+def save_sheet(frames, name, out, fall_box, points=None, lengths=None, rects=None, box=None):
+    """Frames side by side in one crop (returned); box: reuse a crop (the coat map's, the art's)."""
+    if box is None:
+        boxes = [f.getchannel("A").getbbox() for f in frames]
+        box = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
     fw, fh = box[2] - box[0], box[3] - box[1]
     sheet = Image.new("RGBA", (fw * len(frames), fh), (0, 0, 0, 0))
     for i, f in enumerate(frames):
         sheet.alpha_composite(f.crop(box), (i * fw, 0))
+    if MODE == "coat":
+        sheet.save(out / f"{name}-coat.png")
+        return box
     sheet.save(out / f"{name}.png")
     meta = {"frames": len(frames), "frame_w": fw, "frame_h": fh,
             "scale": round(1.625 * fh / (fall_box[3] - fall_box[1]), 4)}
@@ -333,14 +383,18 @@ def save_sheet(frames, name, out, fall_box, points=None, lengths=None, rects=Non
     for key, rect in (rects or {}).items():   # canvas rectangles as fractions of the frame
         meta[key] = box_in(rect, box)
     (out / f"{name}.json").write_text(json.dumps(meta))
-    return fw, fh
+    return box
 
 
-def main(out=SRC):
+def build(out, boxes=None):
+    """Every pose in the current MODE. boxes: the art pass's crops, so the coat maps line up."""
+    boxes = dict(boxes or {})
+    coat = MODE == "coat"
     falling = render()
-    fall_box = falling.getchannel("A").getbbox()
-    falling.crop(fall_box).save(out / "larry-falling.png")
-    (out / "larry-falling.json").write_text(json.dumps({"pet_box": box_in(standing_box(), fall_box)}))
+    fall_box = boxes.get("falling") or falling.getchannel("A").getbbox()
+    falling.crop(fall_box).save(out / ("larry-falling-coat.png" if coat else "larry-falling.png"))
+    if not coat:
+        (out / "larry-falling.json").write_text(json.dumps({"pet_box": box_in(standing_box(), fall_box)}))
     frames = []
     for i in range(FRAMES):
         ph = 2 * math.pi * i / FRAMES
@@ -352,24 +406,40 @@ def main(out=SRC):
             # ...and each front leg pumps when the back leg on the other side lifts
             (waddle(ARM_L, -sway * 1.4, 0.7 * lift_r), waddle(ARM_R, -sway * 1.4, 0.7 * lift_l))))
     # one crop for every frame (and the falling pose) so nothing jumps between them
-    boxes = [f.getchannel("A").getbbox() for f in frames] + [fall_box]
-    box = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+    box = boxes.get("held")
+    if box is None:
+        bb = [f.getchannel("A").getbbox() for f in frames] + [fall_box]
+        box = (min(b[0] for b in bb), min(b[1] for b in bb), max(b[2] for b in bb), max(b[3] for b in bb))
     fw, fh = box[2] - box[0], box[3] - box[1]
     sheet = Image.new("RGBA", (fw * FRAMES, fh), (0, 0, 0, 0))
     for i, f in enumerate(frames):
         sheet.alpha_composite(f.crop(box), (i * fw, 0))
-    sheet.save(out / "larry-held.png")
-    # same scale as the falling pose: its height (767 px) is 1.625x Larry's standing height
-    (out / "larry-held.json").write_text(json.dumps({
-        "frames": FRAMES, "frame_w": fw, "frame_h": fh,
-        "scale": round(1.625 * fh / (fall_box[3] - fall_box[1]), 4), "pet_box": box_in(standing_box(), box)}))
-    tw, th = save_sheet([render_typing(*f) for f in TYPE_FRAMES], "larry-typing", out, fall_box,
-                        rects={"pet_box": standing_box(6)})
-    rw, rh = save_sheet([render_riding(2 * math.pi * i / RIDE_FRAMES) for i in range(RIDE_FRAMES)],
-                        "larry-riding", out, fall_box, {"seat": RIDE_SEAT, "crank": RIDE_CRANK},
-                        {"pedal": RIDE_PEDAL}, {"pet_box": standing_box()})
-    print(f"falling {fall_box[2] - fall_box[0]}x{fall_box[3] - fall_box[1]}, held {FRAMES} frames of {fw}x{fh}, "
-          f"typing {len(TYPE_FRAMES)} frames of {tw}x{th}, riding {RIDE_FRAMES} frames of {rw}x{rh}")
+    sheet.save(out / ("larry-held-coat.png" if coat else "larry-held.png"))
+    if not coat:
+        # same scale as the falling pose: its height (767 px) is 1.625x Larry's standing height
+        (out / "larry-held.json").write_text(json.dumps({
+            "frames": FRAMES, "frame_w": fw, "frame_h": fh,
+            "scale": round(1.625 * fh / (fall_box[3] - fall_box[1]), 4), "pet_box": box_in(standing_box(), box)}))
+    tbox = save_sheet([render_typing(*f) for f in TYPE_FRAMES], "larry-typing", out, fall_box,
+                      rects={"pet_box": standing_box(6)}, box=boxes.get("typing"))
+    rbox = save_sheet([render_riding(2 * math.pi * i / RIDE_FRAMES) for i in range(RIDE_FRAMES)],
+                      "larry-riding", out, fall_box, {"seat": RIDE_SEAT, "crank": RIDE_CRANK},
+                      {"pedal": RIDE_PEDAL}, {"pet_box": standing_box()}, box=boxes.get("riding"))
+    return {"falling": fall_box, "held": box, "typing": tbox, "riding": rbox}
+
+
+def main(out=SRC):
+    global MODE
+    MODE = "art"
+    boxes = build(out)
+    MODE = "coat"
+    build(out, boxes)
+    MODE = "art"
+    larry_coat().save(out / "larry-coat.png")
+    b = boxes
+    size = lambda k: f"{b[k][2] - b[k][0]}x{b[k][3] - b[k][1]}"
+    print(f"falling {size('falling')}, held {FRAMES} frames of {size('held')}, typing {len(TYPE_FRAMES)} frames "
+          f"of {size('typing')}, riding {RIDE_FRAMES} frames of {size('riding')}, + coat maps")
 
 
 if __name__ == "__main__":

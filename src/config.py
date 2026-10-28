@@ -1,6 +1,7 @@
 """Settings file: ~/.config/larry/config.toml (written by the settings window, hand-editable)."""
 import copy
 import os
+import re
 import tomllib
 from pathlib import Path
 
@@ -25,7 +26,10 @@ DEFAULTS = {
     "faces_left": False,               # the image's character looks left (so walking flips correctly)
     "remove_bg": False,                # flood-fill the solid background away (for images without transparency)
     "outline": True,                   # white sticker outline, so dark images show on dark windows
+    "outline_color": "#ffffff",        # its colour
+    "outline_width": 2,                # and how thick it is, px
     "fall_image": "auto",              # picture while falling or held: auto | none | a path
+    "box_tab": True,                   # the pull-down box and its tab (off: just the pet, e.g. with the Waybar module)
     "tab": {
         "edge": "top",                 # top | bottom | left | right
         "position": 72,                # % along that edge (left->right, or top->bottom)
@@ -40,6 +44,8 @@ DEFAULTS = {
         "sit": True,                   # sits down now and then (Larry)
         "sleep": True,                 # dozes off when you leave the mouse alone
         "sleep_after": 60,             # seconds of a still mouse before he falls asleep
+        "peek": True,                  # with the box shut, pokes his head out beside the tab now and then
+        "petting": True,               # hold the middle mouse button (scroll wheel) and stroke him
     },
     "reactions": {
         "packages": True,              # cheers when a package manager finishes (sad if it failed)
@@ -60,6 +66,15 @@ DEFAULTS = {
         "beat": True,                  # listen with cava to dance in time (if cava is installed)
         "notes": True,                 # music notes float up while it dances
     },
+    "updates": True,                   # check GitHub for new releases (and tell you; never installs by itself)
+    "waybar": False,                   # Larry in your Waybar (a module on the left; see waybar.py)
+    "weather": {
+        "enabled": False,              # dress for your local weather (Open-Meteo: no account needed)
+        "place": "",                   # where (as found by the settings window's search)
+        "lat": 0.0,
+        "lon": 0.0,
+        "effects": True,               # rain and snow falling in the box
+    },
     "game": True,                      # catch game: throw the pet up, catch it on the way down
     "pet_sounds": False,               # moo/"weee!" when thrown, a blip when caught (off: could get annoying)
     "sounds": True,                    # clicks and ticks in the settings window
@@ -71,9 +86,13 @@ DEFAULTS = {
         "sky_x": 0.5,                  # framing of a sky picture: pan (0-1) and zoom (1 = just covers the box)
         "sky_y": 0.5,
         "sky_zoom": 1.0,
-        "colors": "theme",             # theme | natural (decoration colours)
+        "colors": "theme",             # theme | natural (floor and sky colours)
         "match_theme": True,           # tint the built-in skies to the colour theme
-        "items": [],                   # decorations, each placed on its own (see scene.py)
+    },
+    "coat": {                          # Larry's colours (only his own pictures can be recoloured)
+        "skin": "#ffffff",
+        "spots": "#000000",
+        "lines": "#000000",
     },
     # what the pet wears, in drawing order: {id: {x, y, scale, rotate, flip, behind}} (see accessories.py)
     "accessories": {},
@@ -87,6 +106,16 @@ RIDE_MIN, RIDE_MAX = 1, 30
 
 COMMENTS = {
     "name": "your pet's name",
+    "updates": "check GitHub about twice a day for a new version, and tell you (nothing installs by itself)",
+    "box_tab": "show the pull-down box and its tab (turn off to keep just the pet, e.g. with the Waybar module)",
+    "waybar": "show Larry in your Waybar (the settings window adds the module on the left)",
+    "place": "where the weather is checked for (search for it in the settings window)",
+    "lat": "its latitude",
+    "lon": "its longitude",
+    "effects": "rain and snow fall in the box when it's raining or snowing there",
+    "skin": "Larry's skin colour, #rrggbb",
+    "spots": "Larry's spot colour, #rrggbb",
+    "lines": "Larry's outline colour (his line work, not the white sticker edge), #rrggbb",
     "pet": "which saved pet this is: a folder in ~/.config/larry/pets/ (changes to the pet are saved there too)",
     "match_theme": "tint the built-in skies (day, sunset, night) to the colour theme",
     "theme": "colours: " + " | ".join(themes.THEMES) + " (desktop follows rice / your GTK theme)",
@@ -95,6 +124,8 @@ COMMENTS = {
     "faces_left": "true if the character in the image looks to the left",
     "remove_bg": "cut out a solid-colour background (for images without transparency)",
     "outline": "white sticker outline around the image",
+    "outline_color": "the sticker outline's colour, #rrggbb",
+    "outline_width": "the sticker outline's thickness in px (1-8)",
     "fall_image": "picture while falling or held: auto (Larry's arms-up pose when the pet is Larry), none, or a path",
     "edge": "screen edge the tab sits on: top | bottom | left | right",
     "position": "where along that edge, in % (left to right / top to bottom)",
@@ -118,6 +149,8 @@ COMMENTS = {
     "downloads": "react when a download finishes in your Downloads folder",
     "bubble": "show a speech bubble saying what finished",
     "sleep_after": f"seconds of a still mouse before falling asleep ({SLEEP_MIN}-{SLEEP_MAX})",
+    "petting": "hold the middle mouse button (scroll wheel) and move over the pet to pet it",
+    "peek": "with the box closed, the pet pokes its head out beside the tab now and then",
     "sounds": "click and tick sounds in the settings window",
     "volume": "sound volume (0-100)",
     "ground": "grass | dirt | sand | snow | stone | none, or img-<name> for ~/.config/larry/grounds/<name>.png",
@@ -126,9 +159,7 @@ COMMENTS = {
     "sky_x": "sky picture framing: left-right pan (0-1)",
     "sky_y": "sky picture framing: up-down pan (0-1)",
     "sky_zoom": f"sky picture zoom (1-{scene.SKY_ZOOM_MAX:g})",
-    "colors": "decoration colours: theme | natural",
-    "items": "decorations: kind (" + ", ".join(scene.DECOR) + " or img-<name> from ~/.config/larry/decorations/), "
-             "x (0-1 across), y (px above the ground), scale, flip, front (over the ground), seed",
+    "colors": "floor and sky colours: theme | natural",
     "preset": "animation preset these values came from (built-in, or ~/.config/larry/animations/<name>.toml)",
 }
 CHOICES = {"colors": [k for k, _ in scene.COLOR_MODES]}
@@ -169,12 +200,7 @@ def parse(user):
             box[key] = round(v) if key == "ground_height" else round(float(v), 3)
     if isinstance(ubox.get("match_theme"), bool):
         box["match_theme"] = ubox["match_theme"]
-    if "items" in ubox:
-        box["items"] = scene.clean_items(ubox["items"])
-    elif isinstance(ubox.get("decorations"), list):   # settings from before decorations could move
-        seed = ubox.get("seed") if isinstance(ubox.get("seed"), int) else 1
-        box["items"] = scene.legacy_items([d for d in ubox["decorations"] if d in scene.DECOR], seed,
-                                          scene.ground_height(box))
+    # (decorations are gone: old "items" / "decorations" in the file are simply left out)
 
     utab = user.get("tab") if isinstance(user.get("tab"), dict) else {}
     if utab.get("edge") in [k for k, _ in scene.EDGES]:
@@ -184,7 +210,7 @@ def parse(user):
         cfg["tab"]["position"] = max(0, min(100, round(pos)))
 
     ubeh = user.get("behavior") if isinstance(user.get("behavior"), dict) else {}
-    for key in ("watch", "sit", "sleep"):
+    for key in ("watch", "sit", "sleep", "petting", "peek"):
         if isinstance(ubeh.get(key), bool):
             cfg["behavior"][key] = ubeh[key]
     v = ubeh.get("sleep_after")
@@ -212,6 +238,17 @@ def parse(user):
         if isinstance(udance.get(key), bool):
             cfg["dance"][key] = udance[key]
 
+    uweather = user.get("weather") if isinstance(user.get("weather"), dict) else {}
+    for key in ("enabled", "effects"):
+        if isinstance(uweather.get(key), bool):
+            cfg["weather"][key] = uweather[key]
+    if isinstance(uweather.get("place"), str):
+        cfg["weather"]["place"] = uweather["place"].strip()[:80]
+    for key, lim in (("lat", 90), ("lon", 180)):
+        v = uweather.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and -lim <= v <= lim:
+            cfg["weather"][key] = float(v)
+
     ureact = user.get("reactions") if isinstance(user.get("reactions"), dict) else {}
     for key in ("packages", "downloads", "bubble"):
         if isinstance(ureact.get(key), bool):
@@ -229,6 +266,12 @@ def parse(user):
 
     cfg["accessories"] = accessories.clean(user.get("accessories"))
 
+    ucoat = user.get("coat") if isinstance(user.get("coat"), dict) else {}
+    for key in ("skin", "spots", "lines"):
+        v = ucoat.get(key)
+        if isinstance(v, str) and re.fullmatch(r"#?[0-9a-fA-F]{6}", v.strip()):
+            cfg["coat"][key] = "#" + v.strip().lstrip("#").lower()
+
     cfg["image"] = os.path.expanduser(cfg["image"])
     if not Path(cfg["image"]).is_file():
         cfg["image"] = DEFAULTS["image"]
@@ -240,6 +283,11 @@ def parse(user):
     if cfg["theme"] not in themes.THEMES:
         cfg["theme"] = themes.DEFAULT
     cfg["size"] = max(SIZE_MIN, min(SIZE_MAX, cfg["size"]))
+    if isinstance(user.get("outline_width"), bool):
+        cfg["outline_width"] = DEFAULTS["outline_width"]
+    cfg["outline_width"] = max(1, min(8, cfg["outline_width"]))
+    oc = cfg["outline_color"].strip()
+    cfg["outline_color"] = "#" + oc.lstrip("#").lower() if re.fullmatch(r"#?[0-9a-fA-F]{6}", oc) else "#ffffff"
     cfg["volume"] = max(0, min(100, cfg["volume"]))
     return cfg
 

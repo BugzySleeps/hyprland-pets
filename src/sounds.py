@@ -109,6 +109,11 @@ class Player:
     def on_need_data(self, src, length, chunk=CHUNK, rate=RATE):
         if self.pipeline is None:
             return
+        if not self.voices:              # nothing playing (most of the time): ready-made silence
+            if getattr(self, "silence", None) is None or len(self.silence) != chunk * 2:
+                self.silence = bytes(chunk * 2)
+            self.push(src, self.silence, chunk, rate)
+            return
         out = [0.0] * chunk
         with self.lock:
             alive = []
@@ -122,6 +127,9 @@ class Player:
                     alive.append(v)
             self.voices = alive
         pcm = array.array("h", (int(max(-1.0, min(1.0, s)) * 32000) for s in out)).tobytes()
+        self.push(src, pcm, chunk, rate)
+
+    def push(self, src, pcm, chunk, rate):
         buf = Gst.Buffer.new_wrapped(pcm)
         buf.pts = self.pts
         buf.duration = Gst.util_uint64_scale(chunk, Gst.SECOND, rate)
@@ -307,6 +315,8 @@ CLIPS = {   # name -> synthesizer (bump the version suffix when one changes, so 
     "best-1": lambda: concat(*(marimba(note(n), 0.07, 0.02, 0.4) for n in (14, 19, 23)),
                              marimba(note(26), 0.3, 0.07, 0.45)),
     "miss-1": lambda: pop(700, 220, 0.16, 0.45),
+    "love-1": lambda: concat(*(marimba(note(n), 0.06, 0.018, 0.35) for n in (19, 23, 26)),
+                             marimba(note(31), 0.32, 0.08, 0.4)),
     "trick-1": lambda: concat(*(marimba(note(n), 0.05, 0.012, 0.45) for n in (19, 23)),
                               marimba(note(31), 0.18, 0.04, 0.5)),
 }

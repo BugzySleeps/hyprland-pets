@@ -337,10 +337,11 @@ PARTS = {   # kind: (back, front, frame transform or None)
 }
 
 
-def draw(cr, kind, L, rider, t, dist=0.0, moving=True, color=None, head=1.3, pedal=0.13, halo=True):
+def draw(cr, kind, L, rider, t, dist=0.0, moving=True, color=None, head=1.3, pedal=0.13, halo=True,
+         halo_rgb=WHITE, halo_px=HALO):
     """Draw it at the origin (feet line, pet's middle, facing right). rider() draws the pet, with
     cr still at the origin. head: how high the rider's head is (L); pedal: the bike's crank length;
-    halo: the white sticker outline (the pet's own "outline" setting)."""
+    halo: the sticker outline (the pet's own "outline" setting), in halo_rgb, halo_px wide."""
     back, front, frame = PARTS[kind]
     s = {"L": L, "t": t, "dist": dist, "moving": moving, "color": color or COLORS[kind], "head": head,
          "pedal": pedal, "bob": math.sin(t * 15) * 0.008 if moving and kind == "car" else 0.0}
@@ -352,18 +353,18 @@ def draw(cr, kind, L, rider, t, dist=0.0, moving=True, color=None, head=1.3, ped
         global _grow
         cr.save()
         cr.scale(L, L)
-        if halo:                     # white sticker outline: the same drawing with every line fatter,
-            cr.save()                # as one white silhouette underneath
+        if halo:                     # sticker outline: the same drawing with every line fatter,
+            cr.save()                # as one silhouette underneath
             cr.rectangle(bounds[0] / L, bounds[1] / L, bounds[2] / L, bounds[3] / L)
             cr.clip()                # (keeps the offscreen layer small)
             cr.push_group()
-            _grow = math.hypot(*cr.device_to_user_distance(HALO, 0)) or HALO / L
+            _grow = math.hypot(*cr.device_to_user_distance(halo_px, 0)) or halo_px / L
             try:
                 part(cr, s)
             finally:
                 _grow = 0.0
             pat = cr.pop_group()
-            cr.set_source_rgb(*WHITE)
+            cr.set_source_rgb(*halo_rgb)
             cr.mask(pat)
             cr.restore()
         part(cr, s)

@@ -5,6 +5,7 @@ import math
 import random
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -26,12 +27,36 @@ import themes  # noqa: E402
 import fonts  # noqa: E402
 import sprites  # noqa: E402
 import vehicles  # noqa: E402
+import waybar  # noqa: E402
+import weather  # noqa: E402
+import onboarding  # noqa: E402
+import account  # noqa: E402
+import updates  # noqa: E402
+from version import VERSION  # noqa: E402
+from color_wheel import ColorWheel, from_hex, to_hex  # noqa: E402
 from curve_editor import CurveEditor  # noqa: E402
 from fitting_room import FittingRoom  # noqa: E402
-from scene_editor import SceneEditor  # noqa: E402
 
-ZOOM = 1.7  # the big preview's magnification
-NAV_GROUPS = [("Your pet", ["pet", "pets", "acc", "anim", "fun"]), ("Around it", ["box", "theme"])]
+ZOOM = 1.45  # the big preview's magnification
+# The sidebar: four tabs, each with a row of subtabs. A subtab is made of the cards of one of the
+# pages below ("source pages", built as before), picked by card title (None: all of that page's cards).
+TABS = [
+    ("pet", "Pet", "face-smile-symbolic", "Who your pet is, how it looks and what it wears", [
+        ("look", "Look", [("pet", None)]),
+        ("acc", "Wardrobe", [("acc", None)]),
+        ("pets", "Saved", [("pets", None)])]),
+    ("play", "Play", "applications-games-symbolic", "Games, music, rides and the little things it gets up to", [
+        ("fun", "Fun", [("fun", ["Catch game", "Music", "Vehicles", "Reactions", "Idle behaviour", "Falling"])]),
+        ("terminal", "Terminal", [("fun", ["Typing in your terminal", "Terminals"])]),
+        ("anim", "Moves", [("anim", None)])]),
+    ("box", "Box", "weather-clear-symbolic", "Its little world, and where else it shows up on your desktop", [
+        ("scene", "Scene", [("box", ["Box and tab", "Ground", "Sky", "Colours", "Tab placement"])]),
+        ("weather", "Weather", [("box", ["Weather"])]),
+        ("waybar", "Waybar", [("box", ["Waybar"])])]),
+    ("style", "Style", "applications-graphics-symbolic", "Colours for this window, the box and the tab", [
+        ("themes", "Themes", [("theme", None)]),
+        ("app", "Updates", [("fun", ["Updates"])])]),
+]
 PAGES = [
     ("pet", "Pet", "face-smile-symbolic", "Who lives in the box, and how they look"),
     ("pets", "My pets", "system-users-symbolic", "Switch between your pets, and share them as pet packs"),
@@ -117,7 +142,7 @@ class Settings(Gtk.Window):
                 print(f"larry: can't save the pet: {e}", file=sys.stderr)
         self.pet_thumbs = {}              # slug -> (signature, sprite) for the My pets tiles
         self.syncing = True               # no sounds/saves while building
-        self.size_timer = self.saved_timer = self.acc_timer = self.scene_timer = None
+        self.size_timer = self.saved_timer = self.acc_timer = self.scene_timer = self.outline_timer = None
         self.choice_pics = {}             # ground/sky tile previews (rebuilt when pictures change)
         self.anchor = None                # where the pet's head is, for placing new accessories
         self.tiles = []                   # mini scene previews to redraw on changes
@@ -135,7 +160,10 @@ class Settings(Gtk.Window):
 
         self.squiggles = []
         root = Gtk.Box(spacing=10, margin=10)
-        self.add(root)
+        self.overlay = Gtk.Overlay()            # (the welcome goes on top of everything: see welcome())
+        self.add(self.overlay)
+        self.overlay.add(root)
+        self.welcome_layer = None
         root.pack_start(self.sidebar(), False, False, 0)
         root.pack_start(css_class(self.main_area(), "main-panel"), True, True, 0)
 
@@ -145,6 +173,9 @@ class Settings(Gtk.Window):
         self.on_curve_pick(None)
         self.ticker = GLib.timeout_add(1000 // 30, self.animate)
         self.syncing = False
+        self.show_update()
+        if account.needs_welcome():             # first time here: the intro, naming, and a short tour
+            self.welcome()
 
     # ── layout ──────────────────────────────────────────────────────────────
     def squiggle(self, alpha=0.32):
@@ -173,7 +204,8 @@ class Settings(Gtk.Window):
         names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
         self.brand = label(self.pet.cfg["name"], "brand-title")
         names.pack_start(self.brand, False, False, 0)
-        names.pack_start(label("settings", "brand-sub"), False, False, 0)
+        self.brand_sub = label(account.since_text() or "settings", "brand-sub")
+        names.pack_start(self.brand_sub, False, False, 0)
         brand.pack_start(self.avatar, False, False, 0)
         brand.pack_start(names, False, False, 0)
         side.pack_start(brand, False, False, 0)
@@ -194,34 +226,40 @@ class Settings(Gtk.Window):
 
         self.nav = {}
         group = None
-        pages = {p[0]: p for p in PAGES}
-        for heading, keys in NAV_GROUPS:
-            side.pack_start(self.section(heading), False, False, 0)
-            for key in keys:
-                _k, title, icon, _sub = pages[key]
-                b = Gtk.RadioButton(group=group)
-                group = group or b
-                b.set_mode(False)
-                css_class(b, "nav")
-                row = Gtk.Box(spacing=12)
-                dot = css_class(Gtk.Box(), "nav-icon")
-                img = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.MENU)
-                img.set_halign(Gtk.Align.CENTER)
-                img.set_valign(Gtk.Align.CENTER)
-                dot.pack_start(img, True, True, 0)
-                row.pack_start(dot, False, False, 0)
-                row.pack_start(label(title, "nav-label"), False, False, 0)
-                if key == "acc":       # a dot while there's a seasonal accessory to claim
-                    self.claim_dot = css_class(Gtk.Box(valign=Gtk.Align.CENTER), "claim-dot")
-                    self.claim_dot.set_no_show_all(True)
-                    row.pack_start(self.claim_dot, False, False, 0)
-                b.add(row)
-                b.snd = "whoosh"
-                b.connect("toggled", self.on_nav, key)
-                side.pack_start(b, False, False, 0)
-                self.nav[key] = b
+        self.nav_heading = self.section("Settings")
+        side.pack_start(self.nav_heading, False, False, 0)
+        for key in [t[0] for t in TABS]:
+            _k, title, icon, _sub, _subs = next(t for t in TABS if t[0] == key)
+            b = Gtk.RadioButton(group=group)
+            group = group or b
+            b.set_mode(False)
+            css_class(b, "nav")
+            row = Gtk.Box(spacing=12)
+            dot = css_class(Gtk.Box(), "nav-icon")
+            img = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.MENU)
+            img.set_halign(Gtk.Align.CENTER)
+            img.set_valign(Gtk.Align.CENTER)
+            dot.pack_start(img, True, True, 0)
+            row.pack_start(dot, False, False, 0)
+            row.pack_start(label(title, "nav-label"), False, False, 0)
+            if key == "pet":       # a dot while there's a seasonal accessory to claim (Wardrobe)
+                self.claim_dot = css_class(Gtk.Box(valign=Gtk.Align.CENTER), "claim-dot")
+                self.claim_dot.set_no_show_all(True)
+                row.pack_start(self.claim_dot, False, False, 0)
+            b.add(row)
+            b.snd = "whoosh"
+            b.connect("toggled", self.on_nav, key)
+            side.pack_start(b, False, False, 0)
+            self.nav[key] = b
 
         side.pack_start(Gtk.Box(), True, True, 0)  # spacer
+
+        redo = css_class(Gtk.Button(label="Redo tour"), "redo-tour")   # quiet: there if you need it
+        redo.set_relief(Gtk.ReliefStyle.NONE)
+        redo.set_halign(Gtk.Align.CENTER)
+        redo.set_tooltip_text("The quick how-to from the first time")
+        redo.connect("clicked", lambda _b: self.welcome(tour_only=True))
+        side.pack_start(redo, False, False, 0)
 
         foot = css_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), "side-card")
         row = Gtk.Box(spacing=12)
@@ -244,7 +282,7 @@ class Settings(Gtk.Window):
         return side
 
     def main_area(self):
-        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
 
         head = Gtk.Box(spacing=12)
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -265,28 +303,99 @@ class Settings(Gtk.Window):
         head.pack_end(self.saved, False, False, 0)
         main.pack_start(head, False, False, 0)
 
+        self.update_bar = css_class(Gtk.Box(spacing=12), "update-bar")   # (shown when there's a new version)
+        self.update_bar.set_no_show_all(True)
+        self.update_text = label("", "update-text", xalign=0)
+        self.update_bar.pack_start(self.update_text, True, True, 0)
+        news = icon_button("What's new", "web-browser-symbolic")
+        news.connect("clicked", lambda _b: self.open_url((updates.available() or {}).get("url", updates.RELEASES)))
+        self.update_bar.pack_start(news, False, False, 0)
+        go = Gtk.Button(label="Update")
+        css_class(go, "chip")
+        go.get_style_context().add_class("primary")
+        go.connect("clicked", self.on_update)
+        self.update_bar.pack_start(go, False, False, 0)
+        main.pack_start(self.update_bar, False, False, 0)
+
         self.preview = css_class(Gtk.DrawingArea(), "hero")
         self.preview.connect("draw", self.draw_preview)
         self.preview_cache = scene.BoxCache(ZOOM)
         main.pack_start(self.preview, False, False, 0)
         self.fit_preview()
 
-        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=180)
-        self.pages = {}
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=160)
+        raw = {}
         for key, build in (("pet", self.pet_page), ("pets", self.pets_page), ("box", self.box_page), ("anim", self.anim_page),
                            ("acc", self.acc_page), ("fun", self.fun_page), ("theme", self.theme_page)):
             self.building = key      # cards made now belong to this page (for search)
-            page = build()
-            scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
-            scroll.add(page)
-            self.stack.add_named(scroll, key)
-            self.pages[key] = (scroll, page)
+            raw[key] = build()
+        self.build_tabs(raw)
         main.pack_start(self.stack, True, True, 0)
         self.show_page("pet")
         return main
 
+    def build_tabs(self, raw):
+        """Sort the source pages' cards into the tabs' subtabs (see TABS)."""
+        titles = {id(h["card"]): h for h in self.search_index}
+        self.pages, self.subs, self.sub_buttons = {}, {}, {}
+        for tab, _title, _icon, _sub, subs in TABS:
+            outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            switch = css_class(Gtk.Box(halign=Gtk.Align.START), "segmented", "subtabs")
+            inner = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=140)
+            group = None
+            for sub, sub_title, sources in subs:
+                b = Gtk.RadioButton.new_with_label_from_widget(group, sub_title)
+                b.set_mode(False)
+                group = group or b
+                b.snd = "select"
+                b.connect("toggled", lambda btn, t=tab, k=sub: btn.get_active() and self.show_sub(t, k))
+                switch.pack_start(b, False, False, 0)
+                self.sub_buttons[(tab, sub)] = b
+                page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_end=12)
+                for src, wanted in sources:
+                    for child in list(raw[src].get_children()):
+                        hit = titles.get(id(child))
+                        if wanted is None or (hit and hit["title"] in wanted):
+                            raw[src].remove(child)
+                            page.pack_start(child, False, False, 0)
+                            if hit:
+                                hit["tab"], hit["sub"] = tab, sub
+                scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+                scroll.add(page)
+                inner.add_named(scroll, sub)
+                self.pages[(tab, sub)] = (scroll, page)
+            self.subs[tab] = inner
+            outer.pack_start(switch, False, False, 0)
+            outer.pack_start(inner, True, True, 0)
+            self.stack.add_named(outer, tab)
+        owner = {id(page): key for key, (_sw, page) in self.pages.items()}
+        for h in self.search_index:      # cards inside other containers: whichever subtab holds them
+            if "tab" in h:
+                continue
+            w = h["card"]
+            while w is not None and id(w) not in owner:
+                w = w.get_parent()
+            if w is not None:
+                h["tab"], h["sub"] = owner[id(w)]
+            else:
+                print(f"larry: settings card without a tab: {h['title']}", file=sys.stderr)
+
+    def show_sub(self, tab, sub):
+        self.subs[tab].set_visible_child_name(sub)
+
+    def open_tab(self, tab, sub=None):
+        self.nav[tab].set_active(True)
+        self.show_page(tab)
+        if sub:
+            self.sub_buttons[(tab, sub)].set_active(True)
+            self.show_sub(tab, sub)
+
+    def current(self):
+        tab = self.stack.get_visible_child_name()
+        return tab, self.subs[tab].get_visible_child_name()
+
     def card(self, title, sub=None, extra=None):
-        box = css_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14), "card")
+        box = css_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10), "card")
         self.search_index.append({"page": self.building, "card": box, "title": title, "text": None})
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         head = Gtk.Box(spacing=14)
@@ -376,9 +485,13 @@ class Settings(Gtk.Window):
         self.name_entry.connect("changed", self.on_name)
         right.pack_start(self.name_entry, False, False, 0)
         reset = icon_button("Bring back Larry", "view-refresh-symbolic")
-        reset.set_halign(Gtk.Align.START)
         reset.connect("clicked", self.on_reset)
-        right.pack_start(reset, False, False, 0)
+        tour = icon_button("Take the tour again", "help-about-symbolic", "The quick how-to from the first time")
+        tour.connect("clicked", lambda _b: self.welcome(tour_only=True))
+        btns = Gtk.Box(spacing=8)
+        btns.pack_start(reset, False, False, 0)
+        btns.pack_start(tour, False, False, 0)
+        right.pack_start(btns, False, False, 0)
         row.pack_start(right, True, True, 0)
         c.pack_start(row, False, False, 0)
         page.pack_start(c, False, False, 0)
@@ -390,21 +503,294 @@ class Settings(Gtk.Window):
         for key, text, sub in (
             ("faces_left", "Looks left", "Turn on if the character in your image faces left"),
             ("remove_bg", "Remove background", "Cut out a solid background (for images without transparency)"),
-            ("outline", "Outline", "White sticker edge so it shows on dark windows"),
+            ("outline", "Outline", "A sticker edge around it, so it shows on dark windows"),
         ):
             sw = Gtk.Switch(active=self.cfg[key], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
             sw.connect("notify::active", self.on_switch, key)
             c.pack_start(self.setting_row(text, sw, sub), False, False, 0)
             self.switches[key] = sw
+        # the sticker outline's colour (a wheel in a popover) and thickness
+        self.outline_btn = Gtk.MenuButton(halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+        self.outline_btn.set_tooltip_text("Pick the outline's colour")
+        inner = Gtk.Box(spacing=8)
+        self.outline_swatch = Gtk.DrawingArea()
+        self.outline_swatch.set_size_request(20, 20)
+        self.outline_swatch.connect("draw", self.draw_outline_swatch)
+        inner.pack_start(self.outline_swatch, False, False, 0)
+        self.outline_hex_label = Gtk.Label(label=self.cfg["outline_color"])
+        inner.pack_start(self.outline_hex_label, False, False, 0)
+        self.outline_btn.add(inner)
+        pop = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
+        self.outline_wheel = ColorWheel(self.on_outline_wheel, self.on_outline_wheel_done, 210)
+        self.outline_wheel.set_rgb(from_hex(self.cfg["outline_color"]))
+        box.pack_start(self.outline_wheel, False, False, 0)
+        hexrow = Gtk.Box(spacing=8)
+        self.outline_hex = Gtk.Entry(max_length=7, width_chars=9, text=self.cfg["outline_color"])
+        self.outline_hex.connect("activate", self.on_outline_hex)
+        hexrow.pack_start(self.outline_hex, True, True, 0)
+        white = icon_button("White", "edit-undo-symbolic", "Back to white")
+        white.connect("clicked", lambda _b: self.set_outline_color("#ffffff"))
+        hexrow.pack_start(white, False, False, 0)
+        box.pack_start(hexrow, False, False, 0)
+        box.show_all()
+        pop.add(box)
+        self.outline_btn.set_popover(pop)
+        self.outline_rows = [self.setting_row("Outline colour", self.outline_btn, "Any colour, from the wheel")]
+        self.outline_width = self.slider(sprites.OUTLINE_MIN, sprites.OUTLINE_MAX, 1, 0, self.cfg["outline_width"],
+                                         " px", self.on_outline_width)
+        self.outline_rows.append(self.setting_row("Outline thickness", self.outline_width, "How far it sticks out"))
+        for r in self.outline_rows:
+            c.pack_start(r, False, False, 0)
+            r.set_sensitive(self.cfg["outline"])
         page.pack_start(c, False, False, 0)
 
+        page.pack_start(self.coat_card(), False, False, 0)
         return page
+
+    # ── the sticker outline ─────────────────────────────────────────────────
+    def draw_outline_swatch(self, w, cr):
+        s = min(w.get_allocated_width(), w.get_allocated_height())
+        cr.arc(s / 2, s / 2, s / 2 - 1, 0, 2 * math.pi)
+        cr.set_source_rgb(*from_hex(self.outline_live()))
+        cr.fill_preserve()
+        cr.set_source_rgba(0.5, 0.5, 0.5, 0.7)
+        cr.set_line_width(1.2)
+        cr.stroke()
+
+    def outline_live(self):
+        return getattr(self, "_outline_live", None) or self.cfg["outline_color"]
+
+    def on_outline_wheel(self, rgb):
+        self._outline_live = to_hex(rgb)
+        self.outline_hex.set_text(self._outline_live)
+        self.outline_hex_label.set_text(self._outline_live)
+        self.outline_swatch.queue_draw()
+
+    def on_outline_wheel_done(self, rgb):
+        self.on_outline_wheel(rgb)
+        self.set_outline_color(self._outline_live)
+
+    def on_outline_hex(self, entry):
+        t = entry.get_text().strip()
+        if re.fullmatch(r"#?[0-9a-fA-F]{6}", t):
+            self.set_outline_color("#" + t.lstrip("#").lower())
+        else:
+            entry.set_text(self.cfg["outline_color"])
+
+    def set_outline_color(self, hexc_):
+        self._outline_live = None
+        was, self.syncing = self.syncing, True
+        self.outline_wheel.set_rgb(from_hex(hexc_))
+        self.outline_hex.set_text(hexc_)
+        self.outline_hex_label.set_text(hexc_)
+        self.syncing = was
+        self.outline_swatch.queue_draw()
+        if not self.syncing and self.cfg["outline_color"] != hexc_:
+            self.cfg["outline_color"] = hexc_
+            self.apply()
+
+    def on_outline_width(self, scale):
+        if self.syncing:
+            return
+        v = int(scale.get_value())
+        if v != self.cfg["outline_width"]:
+            self.cfg["outline_width"] = v
+            if self.outline_timer:
+                GLib.source_remove(self.outline_timer)
+            self.outline_timer = GLib.timeout_add(150, self._outline_done)
+
+    def _outline_done(self):
+        self.outline_timer = None
+        self.apply()
+        return False
+
+    # ── Larry's colours ─────────────────────────────────────────────────────
+    COAT_PRESETS = (("Classic", "#ffffff", "#000000"), ("Jersey", "#f4dcc0", "#a0582a"),
+                    ("Highland", "#f6c08a", "#c4561a"), ("Chocolate", "#8a5a3a", "#3b2216"),
+                    ("Strawberry", "#ffd3e2", "#e04a80"), ("Midnight", "#34363f", "#f4f4f6"),
+                    ("Golden", "#fff1c2", "#d8a21a"), ("Mint", "#e3fff2", "#2fb38a"),
+                    ("Grape", "#ece2ff", "#7a4fd6"), ("Sky", "#e2f1ff", "#3d8fe0"))
+
+    def coat_card(self):
+        self.coat_part = "skin"
+        self.coat_live = dict(self.cfg["coat"])        # what the wheel shows (applied on release)
+        self.coat_card_box = c = self.card("Coat", "Larry's colours: pick skin, spots or lines, then anywhere on the wheel")
+        row = Gtk.Box(spacing=22)
+        self.coat_prev = Gtk.DrawingArea()
+        self.coat_prev.set_size_request(170, 170)
+        self.coat_prev.set_valign(Gtk.Align.CENTER)
+        self.coat_prev.connect("draw", self.draw_coat_prev)
+        row.pack_start(self.coat_prev, False, False, 0)
+        self.wheel = ColorWheel(self.on_wheel, self.on_wheel_done)
+        self.wheel.set_valign(Gtk.Align.CENTER)
+        row.pack_start(self.wheel, False, False, 0)
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, valign=Gtk.Align.CENTER)
+        seg = css_class(Gtk.Box(spacing=0), "segmented")
+        self.coat_btns, group = {}, None
+        for key, text in (("skin", "Skin"), ("spots", "Spots"), ("lines", "Lines")):
+            b = Gtk.RadioButton.new_from_widget(group)
+            b.set_mode(False)
+            group = group or b
+            inner = Gtk.Box(spacing=8)
+            sw = Gtk.DrawingArea()
+            sw.set_size_request(18, 18)
+            sw.connect("draw", self.draw_coat_swatch, key)
+            inner.pack_start(sw, False, False, 0)
+            inner.pack_start(Gtk.Label(label=text), False, False, 0)
+            b.add(inner)
+            b.connect("toggled", self.on_coat_part, key)
+            seg.pack_start(b, False, False, 0)
+            self.coat_btns[key] = (b, sw)
+        right.pack_start(seg, False, False, 0)
+        self.coat_hex = Gtk.Entry(max_length=7, width_chars=9, placeholder_text="#rrggbb")
+        self.coat_hex.set_tooltip_text("Type a colour (#rrggbb) and press Enter")
+        self.coat_hex.connect("activate", self.on_coat_hex)
+        self.coat_hex.connect("focus-out-event", lambda e, _ev: self.on_coat_hex(e) or False)
+        hexrow = Gtk.Box(spacing=8)
+        hexrow.pack_start(self.coat_hex, False, False, 0)
+        right.pack_start(hexrow, False, False, 0)
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, min_children_per_line=5, max_children_per_line=5,
+                           column_spacing=6, row_spacing=6, homogeneous=True)
+        for name, skin, spots in self.COAT_PRESETS:
+            b = css_class(Gtk.Button(), "tile")
+            b.set_tooltip_text(name)
+            da = Gtk.DrawingArea()
+            da.set_size_request(30, 30)
+            da.set_halign(Gtk.Align.CENTER)
+            da.connect("draw", self.draw_coat_preset, skin, spots)
+            b.add(da)
+            b.connect("clicked", self.on_coat_preset, skin, spots)
+            flow.add(b)
+        right.pack_start(flow, False, False, 0)
+        self.coat_note = label("", "row-sub", xalign=0, wrap=True)
+        right.pack_start(self.coat_note, False, False, 0)
+        row.pack_start(right, True, True, 0)
+        c.pack_start(row, False, False, 0)
+        self.coat_src = None
+        self.sync_coat()
+        return c
+
+    def sync_coat(self):
+        was, self.syncing = self.syncing, True
+        self.coat_live = dict(self.cfg["coat"])
+        self.wheel.set_rgb(from_hex(self.coat_live[self.coat_part]))
+        self.coat_hex.set_text(self.coat_live[self.coat_part])
+        larry = sprites.is_larry(self.cfg)
+        self.wheel.set_sensitive(larry)
+        for b, _sw in self.coat_btns.values():
+            b.set_sensitive(larry)
+        self.coat_note.set_text("" if larry else "Only Larry's own picture can be recoloured. Bring him back "
+                                                  "on this page to use these.")
+        self.syncing = was
+        self.redraw_coat()
+
+    def redraw_coat(self):
+        self.coat_prev.queue_draw()
+        for _b, sw in self.coat_btns.values():
+            sw.queue_draw()
+
+    def on_coat_part(self, b, key):
+        if b.get_active():
+            self.coat_part = key
+            was, self.syncing = self.syncing, True
+            self.wheel.set_rgb(from_hex(self.coat_live[key]))
+            self.coat_hex.set_text(self.coat_live[key])
+            self.syncing = was
+
+    def on_wheel(self, rgb):
+        self.coat_live[self.coat_part] = to_hex(rgb)
+        self.coat_hex.set_text(self.coat_live[self.coat_part])
+        self.redraw_coat()
+
+    def on_wheel_done(self, rgb):
+        self.on_wheel(rgb)
+        self.set_coat(self.coat_live)
+
+    def on_coat_hex(self, entry):
+        t = entry.get_text().strip()
+        if not re.fullmatch(r"#?[0-9a-fA-F]{6}", t):
+            entry.set_text(self.coat_live[self.coat_part])
+            return
+        t = "#" + t.lstrip("#").lower()
+        if t != self.coat_live[self.coat_part]:
+            self.coat_live[self.coat_part] = t
+            self.wheel.set_rgb(from_hex(t))
+            self.set_coat(self.coat_live)
+
+    def on_coat_preset(self, _b, skin, spots):
+        self.coat_live = {"skin": skin, "spots": spots, "lines": "#000000"}
+        self.wheel.set_rgb(from_hex(self.coat_live[self.coat_part]))
+        self.coat_hex.set_text(self.coat_live[self.coat_part])
+        self.set_coat(self.coat_live)
+
+    def set_coat(self, coat):
+        self.redraw_coat()
+        if not self.syncing and self.cfg["coat"] != coat:
+            self.cfg["coat"] = dict(coat)
+            self.apply()
+
+    def draw_coat_prev(self, w, cr):
+        """Larry in the colours on the wheel right now (recoloured here, live, as you drag)."""
+        from PIL import Image
+        if self.coat_src is None:
+            h = 300
+            im = Image.open(sprites.LARRY).convert("RGBA")
+            cmap = Image.open(sprites.COAT_MAPS[sprites.LARRY]).convert("RGBA")
+            size = (round(im.width * h / im.height), h)
+            self.coat_src = (im.resize(size, Image.LANCZOS), cmap.resize(size, Image.LANCZOS))
+        im, cmap = self.coat_src
+        cols = tuple(sprites.rgb(self.coat_live[k]) for k in ("skin", "spots", "lines"))
+        key = (cols, sprites.outline_tag(self.cfg), sprites.is_larry(self.cfg))
+        if getattr(self, "coat_pic", None) is None or self.coat_pic[0] != key:   # only when it changes
+            pic = sprites.recolor(im, cmap, *cols) if cols != ((255, 255, 255), (0, 0, 0), (0, 0, 0)) else im
+            if not sprites.is_larry(self.cfg):
+                pic = pic.copy()
+                pic.putalpha(pic.getchannel("A").point(lambda v: v // 3))
+            self.coat_pic = (key, sprites.to_surface(sprites.sticker(pic.copy(), {**self.cfg, "outline": True})))
+        surf = self.coat_pic[1]
+        aw, ah = w.get_allocated_width(), w.get_allocated_height()
+        k = min(aw / surf.get_width(), ah / surf.get_height())
+        cr.translate((aw - surf.get_width() * k) / 2, (ah - surf.get_height() * k) / 2)
+        cr.scale(k, k)
+        cr.set_source_surface(surf, 0, 0)
+        cr.get_source().set_filter(cairo.FILTER_GOOD)
+        cr.paint()
+
+    def draw_coat_swatch(self, w, cr, key):
+        s = min(w.get_allocated_width(), w.get_allocated_height())
+        cr.arc(s / 2, s / 2, s / 2 - 1, 0, 2 * math.pi)
+        cr.set_source_rgb(*from_hex(self.coat_live[key]))
+        cr.fill_preserve()
+        cr.set_source_rgba(0.5, 0.5, 0.5, 0.6)
+        cr.set_line_width(1.2)
+        cr.stroke()
+
+    @staticmethod
+    def draw_coat_preset(w, cr, skin, spots):
+        s = min(w.get_allocated_width(), w.get_allocated_height())
+        r = s / 2 - 1
+        cr.arc(s / 2, s / 2, r, 0, 2 * math.pi)
+        cr.set_source_rgb(*from_hex(skin))
+        cr.fill()
+        for dx, dy, rr in ((-0.25, -0.15, 0.32), (0.3, 0.25, 0.26), (0.1, -0.45, 0.16)):   # a few spots
+            cr.save()
+            cr.arc(s / 2, s / 2, r, 0, 2 * math.pi)
+            cr.clip()
+            cr.arc(s / 2 + dx * r, s / 2 + dy * r, rr * r, 0, 2 * math.pi)
+            cr.set_source_rgb(*from_hex(spots))
+            cr.fill()
+            cr.restore()
+        cr.arc(s / 2, s / 2, r, 0, 2 * math.pi)
+        cr.set_source_rgba(0, 0, 0, 0.55)
+        cr.set_line_width(1.5)
+        cr.stroke()
 
     # ── my pets / pet packs ─────────────────────────────────────────────────
     def pets_page(self):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin_end=12)
 
-        new = icon_button("New pet", "list-add-symbolic", "Start a new pet (as Larry; change it on the Pet page)")
+        new = icon_button("New pet", "list-add-symbolic", "Start a new pet (as Larry; change it under Pet → Look)")
         new.connect("clicked", self.on_new_pet)
         c = self.card("My pets", "Click one to switch. Each remembers its picture, name, size, accessories and "
                                  "animation, and the one you're using saves itself as you change it", new)
@@ -548,12 +934,13 @@ class Settings(Gtk.Window):
         fresh["name"] = "New pet"
         slug, _c = packs.save(fresh)
         self.switch_pet(slug)
-        self.nav["pet"].set_active(True)
+        self.open_tab("pet", "look")
 
     def on_delete_pet(self, slug):
         info = packs.read(slug) or {}
         d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
                               buttons=Gtk.ButtonsType.NONE, text=f"Delete {info.get('name') or slug}?")
+        d.get_style_context().add_class("larry")
         d.format_secondary_text("It's gone for good, unless you exported it as a pet pack.")
         d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Delete", Gtk.ResponseType.ACCEPT)
         if d.run() == Gtk.ResponseType.ACCEPT:
@@ -603,8 +990,11 @@ class Settings(Gtk.Window):
         for uri in data.get_uris() or []:
             path = GLib.filename_from_uri(uri)[0] if uri.startswith("file://") else None
             if path and path.endswith(packs.EXT):
-                self.nav["pets"].set_active(True)
+                self.open_tab("pet", "pets")
                 self.import_pack(path)
+            elif path and any(Path(path).match(p) for p in themes.PALETTE_FILES):   # a palette
+                self.open_tab("style", "themes")
+                self.palette_from(Path(path), Path(path).stem)
 
     def import_pack(self, path):
         try:
@@ -625,63 +1015,68 @@ class Settings(Gtk.Window):
     def box_page(self):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin_end=12)
 
-        c = self.card("Scene", "Arrange everything: drag decorations around, drag the ground's edge to "
-                               "raise or lower it, drag a sky picture to frame it")
-        self.scene_ed = SceneEditor(self.pet, lambda: self.cfg, self.on_scene_change, self.on_scene_select,
-                                    self.curve_sound)
-        c.pack_start(self.scene_ed, False, False, 0)
-        self.deco_controls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        bar = Gtk.Box(spacing=8)
-        self.deco_name = label("", "acc-name")
-        bar.pack_start(self.deco_name, True, True, 0)
-        self.deco_buttons = {}
-        for key, text, icon, tip, cb in (
-            ("fwd", "Forward", "go-up-symbolic", "Draw it over the other decorations", lambda b: self.deco_layer(1)),
-            ("back", "Back", "go-down-symbolic", "Draw it under the other decorations", lambda b: self.deco_layer(-1)),
-            ("dup", "Duplicate", "edit-copy-symbolic", "Add another one just like it", self.deco_duplicate),
-            ("del", "Remove", "edit-delete-symbolic", "Take it out of the box", self.deco_remove),
-        ):
-            btn = icon_button(text, icon, tip)
-            btn.connect("clicked", cb)
-            bar.pack_start(btn, False, False, 0)
-            self.deco_buttons[key] = btn
-        self.deco_controls.pack_start(bar, False, False, 0)
-        row = Gtk.Box(spacing=28)
-        self.deco_scale = self.slider(scene.SCALE_MIN * 100, scene.SCALE_MAX * 100, 1, 0, 100, "%",
-                                      lambda sc: self.deco_set("scale", round(sc.get_value() / 100, 3)))
-        size = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        size.pack_start(label("Size", "row-title"), False, False, 0)
-        size.pack_start(self.deco_scale, False, False, 0)
-        row.pack_start(size, True, True, 0)
-        self.deco_flags = {}
-        for key, text in (("flip", "Mirror"), ("front", "Over the ground")):
-            sw = Gtk.Switch(valign=Gtk.Align.CENTER)
-            sw.connect("notify::active", lambda w, _p, k=key: self.deco_set(k, w.get_active()))
-            box = Gtk.Box(spacing=10)
-            box.pack_start(sw, False, False, 0)
-            box.pack_start(label(text, "row-title"), False, False, 0)
-            row.pack_start(box, False, False, 0)
-            self.deco_flags[key] = sw
-        self.deco_controls.pack_start(row, False, False, 0)
-        self.deco_controls.set_no_show_all(True)
-        c.pack_start(self.deco_controls, False, False, 0)
+        c = self.card("Box and tab", "The pull-down box your pet lives in, and the little tab that opens it")
+        self.box_switch = Gtk.Switch(active=self.cfg["box_tab"], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+        self.box_switch.connect("notify::active", self.on_box_tab)
+        c.pack_start(self.setting_row("Show the box and tab", self.box_switch,
+                                      "Turn off to keep just your pet on the desktop. With the Waybar module on, "
+                                      "its click pops your pet out and tucks it away again"), False, False, 0)
+        self.box_note = label("", "row-sub", xalign=0, wrap=True)
+        self.box_note.set_no_show_all(True)       # (shown only when there's something to say)
+        c.pack_start(self.box_note, False, False, 0)
+        page.pack_start(c, False, False, 0)
+        self.update_box_note()
+
+        c = self.card("Weather", "Your pet dresses for the weather where you are: an umbrella hat when it rains, a "
+                                 "scarf when it snows or gets cold, and rain or snow falls in the box. From "
+                                 "Open-Meteo: free, no account")
+        wc = self.cfg["weather"]
+        self.weather_switch = Gtk.Switch(active=wc["enabled"], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+        self.weather_switch.connect("notify::active", self.on_weather_key, "enabled")
+        c.pack_start(self.setting_row("Dress for the weather", self.weather_switch), False, False, 0)
+        row = Gtk.Box(spacing=10)
+        self.weather_place = Gtk.Entry(text=wc["place"], placeholder_text="Your town or city", max_length=80)
+        self.weather_place.connect("activate", self.on_weather_find)
+        # hidden until you ask (handy when showing your desktop to someone): dots, and an eye to peek
+        self.place_shown = False
+        self.weather_place.connect("icon-press", lambda *_: self.show_place(not self.place_shown))
+        self.show_place(False)
+        row.pack_start(self.weather_place, True, True, 0)
+        find = icon_button("Find", "edit-find-symbolic", "Look the place up (once) to get its weather")
+        find.connect("clicked", self.on_weather_find)
+        row.pack_start(find, False, False, 0)
+        c.pack_start(row, False, False, 0)
+        self.weather_fx = Gtk.Switch(active=wc["effects"], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+        self.weather_fx.connect("notify::active", self.on_weather_key, "effects")
+        c.pack_start(self.setting_row("Rain and snow in the box", self.weather_fx), False, False, 0)
+        seg = css_class(Gtk.Box(), "segmented")
+        self.weather_try_btns, group = {}, None
+        for key, text in ((None, "Live"), ("rain", "Rain"), ("snow", "Snow"), ("storm", "Storm"), ("cold", "Cold")):
+            b = Gtk.RadioButton.new_with_label_from_widget(group, text)
+            b.set_mode(False)
+            group = group or b
+            b.connect("toggled", self.on_weather_try, key)
+            seg.pack_start(b, False, False, 0)
+            self.weather_try_btns[key] = b
+        c.pack_start(self.setting_row("Try it", seg, "See the outfits without waiting for the weather"),
+                     False, False, 0)
+        self.weather_status = label("", "row-sub", xalign=0, wrap=True)
+        c.pack_start(self.weather_status, False, False, 0)
+        page.pack_start(c, False, False, 0)
+        GLib.idle_add(lambda: self.show_weather() and False)
+
+        c = self.card("Waybar", "A little square in your bar with your pet's face in it, showing how it feels "
+                                "(happy, asleep, startled...). Click it and your pet pops out with a puff of smoke (click "
+                                "again to send it back to its box), right-click for these settings")
+        self.waybar_switch = Gtk.Switch(active=self.cfg["waybar"], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+        self.waybar_switch.connect("notify::active", self.on_waybar)
+        c.pack_start(self.setting_row("Show in Waybar", self.waybar_switch,
+                                      "Adds a module on the left of your bar (and takes it out again)"), False, False, 0)
+        self.waybar_status = label("", "row-sub", xalign=0, wrap=True)
+        self.waybar_status.set_selectable(True)
+        c.pack_start(self.waybar_status, False, False, 0)
         page.pack_start(c, False, False, 0)
 
-        shuffle = icon_button("Shuffle", "media-playlist-shuffle-symbolic", "Scatter the decorations")
-        shuffle.connect("clicked", self.on_shuffle)
-        clear = icon_button("Clear", "edit-clear-all-symbolic", "Take every decoration out")
-        clear.connect("clicked", self.deco_clear)
-        add = icon_button("Add picture…", "list-add-symbolic", "Use any image as a decoration")
-        add.connect("clicked", lambda b: self.add_picture("decorations"))
-        extra = Gtk.Box(spacing=8)
-        for w in (add, shuffle, clear):
-            extra.pack_start(w, False, False, 0)
-        c = self.card("Decorations", "Click one to drop it in the box; add as many as you like", extra)
-        self.deco_flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
-                                     min_children_per_line=4, max_children_per_line=8,
-                                     column_spacing=10, row_spacing=10)
-        c.pack_start(self.deco_flow, False, False, 0)
-        page.pack_start(c, False, False, 0)
 
         self.choice_flows, self.choice_buttons = {}, {}
         add = icon_button("Add picture…", "list-add-symbolic", "Use any image as the ground (it repeats across)")
@@ -691,7 +1086,7 @@ class Settings(Gtk.Window):
         c.pack_start(self.choice_flows["ground"], False, False, 0)
         self.ground_h = self.slider(scene.GROUND_MIN, scene.GROUND_MAX, 1, 0, self.cfg["box"]["ground_height"], " px",
                                     lambda sc: self.set_box("ground_height", int(sc.get_value()), soon=True))
-        c.pack_start(self.setting_row("Height", self.ground_h, "Or drag the ground's top edge in the scene"),
+        c.pack_start(self.setting_row("Height", self.ground_h, "How thick the ground is"),
                      False, False, 0)
         page.pack_start(c, False, False, 0)
 
@@ -708,13 +1103,18 @@ class Settings(Gtk.Window):
         row = Gtk.Box(spacing=12)
         row.pack_start(self.sky_zoom, True, True, 0)
         row.pack_start(reset, False, False, 0)
-        self.sky_controls.pack_start(self.setting_row("Zoom", row, "Drag the sky in the scene to pan it"),
-                                     False, False, 0)
+        self.sky_controls.pack_start(self.setting_row("Zoom", row, "How close the picture is"), False, False, 0)
+        self.sky_pan = {}
+        for key, text, sub in (("sky_x", "Left / right", "Which part of the picture shows"),
+                               ("sky_y", "Up / down", None)):
+            self.sky_pan[key] = self.slider(0, 100, 1, 0, self.cfg["box"][key] * 100, "%",
+                                            lambda sc, k=key: self.set_box(k, round(sc.get_value() / 100, 3), soon=True))
+            self.sky_controls.pack_start(self.setting_row(text, self.sky_pan[key], sub), False, False, 0)
         self.sky_controls.set_no_show_all(True)
         c.pack_start(self.sky_controls, False, False, 0)
         page.pack_start(c, False, False, 0)
 
-        c = self.card("Colours", "Tint decorations to your rice theme, or keep their real colours")
+        c = self.card("Colours", "Tint the ground and sky to your theme, or keep their natural colours")
         flow, self.color_tiles = self.tiles_row(scene.COLOR_MODES, self.cfg["box"]["colors"],
                                                 lambda k: self.set_box("colors", k),
                                                 lambda cr, w, h, k: self.draw_tile(cr, w, h, colors=k))
@@ -732,7 +1132,6 @@ class Settings(Gtk.Window):
 
         self.fill_choice("ground")
         self.fill_choice("sky")
-        self.fill_decos()
         return page
 
     @staticmethod
@@ -792,37 +1191,7 @@ class Settings(Gtk.Window):
         if which == "sky":
             self.update_sky_controls()
 
-    def fill_decos(self):
-        for child in self.deco_flow.get_children():
-            self.deco_flow.remove(child)
-        for kind, title in scene.DECORATIONS + library.items("decorations"):
-            b = css_class(Gtk.Button(), "tile")
-            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            pic = Gtk.DrawingArea()
-            pic.set_size_request(84, 56)
-            pic.connect("draw", lambda w, cr, k=kind: self.draw_deco_tile(cr, w.get_allocated_width(),
-                                                                         w.get_allocated_height(), k))
-            inner.pack_start(pic, False, False, 0)
-            name = label(title, "tile-label", xalign=0.5)
-            name.set_ellipsize(3)
-            name.set_max_width_chars(12)
-            inner.pack_start(name, False, False, 0)
-            b.add(inner)
-            b.set_tooltip_text(f"Add {title.lower()}")
-            b.connect("clicked", lambda btn, k=kind: self.deco_add(k))
-            tile = self.deletable(b, "decorations", kind) if library.is_custom(kind) else b
-            self.deco_flow.add(tile)
-        self.deco_flow.show_all()
-
     # ── scene ───────────────────────────────────────────────────────────────
-    def on_scene_change(self):
-        self.update_deco_controls()
-        self.sync_box_sliders()
-        self.scene_apply_soon()
-
-    def on_scene_select(self, _i):
-        self.update_deco_controls()
-
     def scene_apply_soon(self):
         if self.scene_timer:
             GLib.source_remove(self.scene_timer)
@@ -837,22 +1206,8 @@ class Settings(Gtk.Window):
         was, self.syncing = self.syncing, True
         self.ground_h.set_value(self.cfg["box"]["ground_height"])
         self.sky_zoom.set_value(self.cfg["box"]["sky_zoom"] * 100)
-        self.syncing = was
-
-    def update_deco_controls(self):
-        it = self.scene_ed.selected()
-        if it is None:
-            self.deco_controls.hide()
-            return
-        self.deco_controls.show_all()
-        was, self.syncing = self.syncing, True
-        self.deco_name.set_text(scene.deco_title(it["kind"]))
-        self.deco_scale.set_value(it["scale"] * 100)
-        for key, sw in self.deco_flags.items():
-            sw.set_active(it[key])
-        i, n = self.scene_ed.sel, len(self.cfg["box"]["items"])
-        self.deco_buttons["fwd"].set_sensitive(i < n - 1)
-        self.deco_buttons["back"].set_sensitive(i > 0)
+        for key, sl in self.sky_pan.items():
+            sl.set_value(self.cfg["box"][key] * 100)
         self.syncing = was
 
     def update_sky_controls(self):
@@ -860,60 +1215,6 @@ class Settings(Gtk.Window):
             self.sky_controls.show_all()
         else:
             self.sky_controls.hide()
-
-    def deco_set(self, key, value):
-        it = self.scene_ed.selected()
-        if self.syncing or it is None:
-            return
-        it[key] = value
-        self.scene_ed.queue_draw()
-        self.scene_apply_soon()
-
-    def deco_add(self, kind):
-        items = self.cfg["box"]["items"]
-        items.append(scene.new_item(kind))
-        self.sound.play("pop_up")
-        self.scene_ed.select(len(items) - 1)
-        self.apply()
-
-    def deco_duplicate(self, _b):
-        it = self.scene_ed.selected()
-        if it is None:
-            return
-        twin = dict(it, x=round(min(it["x"] + 0.08, 1.0), 3), seed=random.randint(1, 99999))
-        self.cfg["box"]["items"].insert(self.scene_ed.sel + 1, twin)
-        self.sound.play("pop_up")
-        self.scene_ed.select(self.scene_ed.sel + 1)
-        self.apply()
-
-    def deco_remove(self, _b=None):
-        i = self.scene_ed.sel
-        if self.scene_ed.selected() is None:
-            return
-        del self.cfg["box"]["items"][i]
-        self.sound.play("pop_down")
-        self.scene_ed.select(None)
-        self.apply()
-
-    def deco_layer(self, d):
-        i, items = self.scene_ed.sel, self.cfg["box"]["items"]
-        if self.scene_ed.selected() is None:
-            return
-        j = min(max(i + d, 0), len(items) - 1)
-        items.insert(j, items.pop(i))
-        self.scene_ed.select(j)
-        self.apply()
-
-    def deco_clear(self, _b):
-        self.cfg["box"]["items"] = []
-        self.scene_ed.select(None)
-        self.apply()
-
-    def on_shuffle(self, _b):
-        for it in self.cfg["box"]["items"]:
-            it["x"] = round(random.uniform(0.08, 0.92), 3)
-            it["seed"] = random.randint(1, 99999)
-        self.apply()
 
     def on_sky_reset(self, _b):
         self.cfg["box"].update(sky_x=0.5, sky_y=0.5, sky_zoom=1.0)
@@ -949,9 +1250,6 @@ class Settings(Gtk.Window):
         if kind == "accessories":
             self.fill_custom()
             self.custom_tiles[item_id].set_active(True)   # puts it on (and picks it)
-        elif kind == "decorations":
-            self.fill_decos()
-            self.deco_add(item_id)
         else:
             which = "ground" if kind == "grounds" else "sky"
             if kind == "skies":
@@ -971,10 +1269,6 @@ class Settings(Gtk.Window):
                 if self.room.sel == item_id:
                     self.room.select(None)
             self.fill_custom()
-        elif kind == "decorations":
-            box["items"] = [it for it in box["items"] if it["kind"] != item_id]
-            self.scene_ed.select(None)
-            self.fill_decos()
         elif kind == "grounds":
             if box["ground"] == item_id:
                 box["ground"] = config.DEFAULTS["box"]["ground"]
@@ -1063,6 +1357,21 @@ class Settings(Gtk.Window):
         filt.set_name("Images")
         filt.add_pixbuf_formats()
         pictures = Path.home() / "Pictures"
+
+        c = self.card("Updates", "New versions come out now and then. You'll be told (never updated by "
+                                 "surprise): click Update and the installer runs in a terminal")
+        self.updates_switch = Gtk.Switch(active=self.cfg["updates"], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+        self.updates_switch.connect("notify::active", self.on_switch, "updates")
+        c.pack_start(self.setting_row("Check for updates", self.updates_switch, "Asks GitHub about twice a day"),
+                     False, False, 0)
+        row = Gtk.Box(spacing=10)
+        self.update_status = label("", "row-sub", xalign=0)
+        row.pack_start(self.update_status, True, True, 0)
+        now = icon_button("Check now", "view-refresh-symbolic")
+        now.connect("clicked", self.on_check_updates)
+        row.pack_start(now, False, False, 0)
+        c.pack_start(row, False, False, 0)
+        page.pack_start(c, False, False, 0)
 
         c = self.card("Catch game", "Throw your pet up and catch it on the way down: +1, or +2 off a wall, +3 off "
                                     "two sides. Catches count in a row; let it land and the streak's over. "
@@ -1166,6 +1475,8 @@ class Settings(Gtk.Window):
             ("watch", "Watch the cursor", "Stops and turns to look when the mouse comes close (Larry's eyes follow it)"),
             ("sit", "Sit down", "Takes a seat now and then (Larry; other pets just stand)"),
             ("sleep", "Fall asleep", "Dozes off when you leave the mouse alone; bring it close to wake it"),
+            ("petting", "Petting", "Hold the scroll wheel down and stroke your pet. Keep going and it flops over"),
+            ("peek", "Peek out", "With the box shut, it pokes its head out beside the tab now and then"),
         ):
             sw = Gtk.Switch(active=self.cfg["behavior"][key], halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
             sw.connect("notify::active", self.on_behavior, key)
@@ -1228,29 +1539,37 @@ class Settings(Gtk.Window):
     def theme_page(self):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin_end=12)
         c = self.card("Theme", "Desktop follows your rice theme if you use it, otherwise your GTK theme")
-        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
-                           min_children_per_line=2, max_children_per_line=4, column_spacing=12, row_spacing=12)
-        group, self.theme_buttons, self.theme_tiles = None, {}, []
-        for key, (title, _pal, _light) in themes.THEMES.items():
-            b = Gtk.RadioButton(group=group)
-            group = group or b
-            b.set_mode(False)
-            css_class(b, "tile")
-            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            pic = Gtk.DrawingArea()
-            pic.set_size_request(150, 88)
-            pic.connect("draw", self.draw_theme_tile, key)
-            self.theme_tiles.append(pic)
-            inner.pack_start(pic, False, False, 0)
-            inner.pack_start(label(title, "tile-label", xalign=0.5), False, False, 0)
-            b.add(inner)
-            b.snd = "select"
-            flow.add(b)
-            self.theme_buttons[key] = b
-        self.theme_buttons[self.cfg["theme"]].set_active(True)
-        for key, b in self.theme_buttons.items():
-            b.connect("toggled", lambda btn, k=key: btn.get_active() and self.on_theme(k))
-        c.pack_start(flow, False, False, 0)
+        self.theme_flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                                      min_children_per_line=2, max_children_per_line=4, column_spacing=12,
+                                      row_spacing=12)
+        self.theme_buttons, self.theme_tiles = {}, []
+        for key in themes.THEMES:
+            self.add_theme_tile(key)
+        self.theme_buttons.get(self.cfg["theme"], self.theme_buttons[themes.DEFAULT]).set_active(True)
+        c.pack_start(self.theme_flow, False, False, 0)
+        page.pack_start(c, False, False, 0)
+
+        c = self.card("Make a theme from a palette",
+                      "Find a palette you like on Coolors, export it (Image, SVG, CSS, ASE or PDF all work) or "
+                      "copy its link, then bring it here. Your theme gets made from its colours")
+        row = Gtk.Box(spacing=10)
+        browse = icon_button("Browse palettes on Coolors", "web-browser-symbolic", themes.COOLORS)
+        browse.connect("clicked", lambda _b: self.open_url(themes.COOLORS))
+        row.pack_start(browse, False, False, 0)
+        upload = icon_button("Upload palette…", "document-open-symbolic", "A palette file you downloaded")
+        upload.connect("clicked", self.on_upload_palette)
+        row.pack_start(upload, False, False, 0)
+        c.pack_start(row, False, False, 0)
+        row = Gtk.Box(spacing=10)
+        self.palette_link = Gtk.Entry(placeholder_text="…or paste a palette link (coolors.co/264653-2a9d8f-…)")
+        self.palette_link.connect("activate", self.on_palette_link)
+        row.pack_start(self.palette_link, True, True, 0)
+        use = icon_button("Use", "go-next-symbolic")
+        use.connect("clicked", self.on_palette_link)
+        row.pack_start(use, False, False, 0)
+        c.pack_start(row, False, False, 0)
+        self.palette_status = label("", "row-sub", xalign=0, wrap=True)
+        c.pack_start(self.palette_status, False, False, 0)
         page.pack_start(c, False, False, 0)
 
         c = self.card("The box")
@@ -1268,10 +1587,45 @@ class Settings(Gtk.Window):
             self.cfg["box"]["match_theme"] = sw.get_active()
             self.apply()
 
+    def add_theme_tile(self, key):
+        title = themes.THEMES[key][0]
+        group = next(iter(self.theme_buttons.values()), None)
+        b = Gtk.RadioButton.new_from_widget(group)
+        b.set_mode(False)
+        css_class(b, "tile")
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        pic = Gtk.DrawingArea()
+        pic.set_size_request(150, 88)
+        pic.connect("draw", self.draw_theme_tile, key)
+        self.theme_tiles.append(pic)
+        if themes.is_custom(key):       # yours: a little x to delete it
+            over = Gtk.Overlay()
+            over.add(pic)
+            x = css_class(Gtk.Button(), "tile-x")
+            x.add(Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU))
+            x.set_halign(Gtk.Align.END)
+            x.set_valign(Gtk.Align.START)
+            x.set_tooltip_text(f"Delete {title}")
+            x.connect("clicked", lambda _b, k=key: self.on_delete_theme(k))
+            over.add_overlay(x)
+            inner.pack_start(over, False, False, 0)
+        else:
+            inner.pack_start(pic, False, False, 0)
+        inner.pack_start(label(title, "tile-label", xalign=0.5), False, False, 0)
+        b.add(inner)
+        b.snd = "select"
+        b.connect("toggled", lambda btn, k=key: btn.get_active() and self.on_theme(k))
+        self.theme_flow.add(b)
+        self.theme_buttons[key] = b
+        return b
+
     def draw_theme_tile(self, area, cr, key):
         """A tiny settings window in the theme's colours."""
         w, h = area.get_allocated_width(), area.get_allocated_height()
-        c = self.pet.theme_preview(key)
+        self.draw_theme_mini(cr, w, h, self.pet.theme_preview(key))
+
+    @staticmethod
+    def draw_theme_mini(cr, w, h, c):
         rounded(cr, 0, 0, w, h, 14)
         cr.set_source_rgb(*c["bg0"])
         cr.fill_preserve()
@@ -1315,6 +1669,137 @@ class Settings(Gtk.Window):
             return
         self.cfg["theme"] = key
         self.apply()            # the pet recolours, then calls restyle() on this window
+
+    # ── themes from palettes ────────────────────────────────────────────────
+    def open_url(self, url):
+        try:
+            Gtk.show_uri_on_window(self, url, Gdk.CURRENT_TIME)
+        except GLib.Error:
+            GLib.spawn_async(["xdg-open", url], flags=GLib.SpawnFlags.SEARCH_PATH)
+
+    def on_upload_palette(self, _b):
+        d = Gtk.FileChooserDialog(title="Upload a palette", transient_for=self, action=Gtk.FileChooserAction.OPEN)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Upload", Gtk.ResponseType.ACCEPT)
+        f = Gtk.FileFilter()
+        f.set_name("Palettes (image, SVG, CSS, ASE, PDF, ...)")
+        for pat in themes.PALETTE_FILES:
+            f.add_pattern(pat)
+            f.add_pattern(pat.upper())
+        d.add_filter(f)
+        folder_ = Path.home() / "Downloads"
+        if folder_.is_dir():
+            d.set_current_folder(str(folder_))
+        path = d.get_filename() if d.run() == Gtk.ResponseType.ACCEPT else None
+        d.destroy()
+        if path:
+            self.palette_from(Path(path), Path(path).stem)
+
+    def on_palette_link(self, _w):
+        text = self.palette_link.get_text().strip()
+        if text:
+            self.palette_from(text, "My theme")
+
+    def palette_from(self, source, name):
+        try:
+            cols = themes.read_palette(source)
+        except (themes.PaletteError, OSError) as e:
+            self.palette_status.set_text(f"Couldn't read that palette: {e}")
+            self.sound.play("grab")
+            return
+        name = re.sub(r"[-_]+", " ", name).strip()
+        if name.lower().startswith("coolors") or re.fullmatch(r"[0-9a-fA-F ]{6,}", name) or not name:
+            name = "My theme"
+        self.palette_status.set_text("")
+        self.palette_link.set_text("")
+        self.new_theme_dialog(cols, name[:40])
+
+    def new_theme_dialog(self, cols, name):
+        """Name it, pick dark or light, see it, make it."""
+        d = Gtk.Dialog(title="New theme", transient_for=self, modal=True)
+        d.get_style_context().add_class("larry")
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Make theme", Gtk.ResponseType.ACCEPT)
+        css_class(d.get_widget_for_response(Gtk.ResponseType.ACCEPT), "chip")
+        d.get_widget_for_response(Gtk.ResponseType.ACCEPT).get_style_context().add_class("primary")
+        d.set_default_response(Gtk.ResponseType.ACCEPT)
+        box = d.get_content_area()
+        box.set_spacing(14)
+        box.set_border_width(18)
+        state = {"light": themes.guess_light(cols)}
+        state["pal"] = themes.from_palette(cols, state["light"])[0]
+
+        strip = Gtk.DrawingArea()
+        strip.set_size_request(360, 44)
+
+        def draw_strip(w, cr):
+            ww, hh = w.get_allocated_width(), w.get_allocated_height()
+            rounded(cr, 0, 0, ww, hh, 14)
+            cr.clip()
+            n = len(cols)
+            for i, col in enumerate(cols):
+                cr.rectangle(ww * i / n, 0, ww / n + 1, hh)
+                cr.set_source_rgb(*themes.rgb(col))
+                cr.fill()
+        strip.connect("draw", draw_strip)
+        box.pack_start(label(f"{len(cols)} colours found", "row-sub"), False, False, 0)
+        box.pack_start(strip, False, False, 0)
+
+        entry = Gtk.Entry(text=name, max_length=40, activates_default=True)
+        box.pack_start(self.setting_row("Name", entry), False, False, 0)
+
+        seg = css_class(Gtk.Box(), "segmented")
+        dark_b = Gtk.RadioButton.new_with_label(None, "Dark")
+        light_b = Gtk.RadioButton.new_with_label_from_widget(dark_b, "Light")
+        for b in (dark_b, light_b):
+            b.set_mode(False)
+            seg.pack_start(b, False, False, 0)
+        (light_b if state["light"] else dark_b).set_active(True)
+        box.pack_start(self.setting_row("Style", seg, "Picked for you from the palette"), False, False, 0)
+
+        prev = Gtk.DrawingArea()
+        prev.set_size_request(360, 200)
+        prev.connect("draw", lambda w, cr: self.draw_theme_mini(
+            cr, w.get_allocated_width(), w.get_allocated_height(),
+            {k: themes.rgb(v) for k, v in state["pal"].items()}))
+        box.pack_start(prev, False, False, 0)
+
+        def on_style(b, light):
+            if b.get_active():
+                state["light"] = light
+                state["pal"] = themes.from_palette(cols, light)[0]
+                prev.queue_draw()
+        dark_b.connect("toggled", on_style, False)
+        light_b.connect("toggled", on_style, True)
+
+        d.show_all()
+        ok = d.run() == Gtk.ResponseType.ACCEPT
+        title = entry.get_text().strip() or "My theme"
+        d.destroy()
+        if not ok:
+            return
+        key = themes.save_custom(title, state["pal"], state["light"], cols)
+        was, self.syncing = self.syncing, True
+        self.add_theme_tile(key).show_all()
+        self.syncing = was
+        self.theme_buttons[key].set_active(True)     # use it straight away
+        self.palette_status.set_text(f"Made “{themes.THEMES[key][0]}”. It's in your themes above")
+        self.sound.play("on")
+
+    def on_delete_theme(self, key):
+        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                              buttons=Gtk.ButtonsType.NONE, text=f"Delete {themes.THEMES[key][0]}?")
+        d.get_style_context().add_class("larry")
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Delete", Gtk.ResponseType.ACCEPT)
+        sure = d.run() == Gtk.ResponseType.ACCEPT
+        d.destroy()
+        if not sure:
+            return
+        if self.cfg["theme"] == key:
+            self.theme_buttons[themes.DEFAULT].set_active(True)
+        b = self.theme_buttons.pop(key)
+        child = b.get_parent()                    # the FlowBoxChild
+        self.theme_flow.remove(child)
+        themes.delete_custom(key)
+        self.sound.play("pop_down")
 
     def acc_page(self):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin_end=12)
@@ -1735,6 +2220,11 @@ class Settings(Gtk.Window):
         .nav:checked .nav-icon image {{ color: {on_acc}; }}
         .nav-label {{ font-weight: 700; font-size: 14px; }}
         .side-card {{ background: {card}; border-radius: 20px; padding: 8px 12px 6px 6px; }}
+        .update-bar {{ background: {tonal}; border-radius: 18px; padding: 10px 12px 10px 18px; }}
+        .update-text {{ font-size: 14px; }}
+        window.larry button.redo-tour, window.larry button.redo-tour:hover {{ background: none; padding: 2px 8px;
+            min-height: 0; opacity: 0.5; font-size: 12px; font-weight: 700; }}
+        window.larry button.redo-tour:hover {{ opacity: 0.85; }}
         .saved {{ opacity: 0; background: {tonal}; color: {acc2}; font-weight: 800; font-size: 12px;
                   border-radius: 999px; padding: 6px 12px; transition: opacity 500ms ease; }}
         .saved.show {{ opacity: 1; transition: opacity 120ms ease; }}
@@ -1746,13 +2236,14 @@ class Settings(Gtk.Window):
         window.larry .results row {{ border-radius: 14px; }}
         window.larry .results row:hover {{ background: {tonal}; }}
 
-        .page-title {{ font-size: 34px; font-weight: 900; }}
+        .page-title {{ font-size: 28px; font-weight: 900; }}
         .page-sub {{ color: {muted}; font-size: 14px; font-weight: 600; }}
         .sub-icon {{ min-width: 26px; min-height: 26px; border-radius: 999px; background: {tonal}; }}
         .sub-icon image {{ color: {acc2}; }}
-        .card {{ background-color: {card}; border-radius: 24px; padding: 20px 22px; margin-bottom: 2px; }}
+        .card {{ background-color: {card}; border-radius: 20px; padding: 16px 18px; margin-bottom: 0; }}
         .card.found {{ box-shadow: inset 0 0 0 2px {acc2}; background-color: {tonal}; }}
-        .card-title {{ font-weight: 900; font-size: 18px; }}
+        .card-title {{ font-weight: 900; font-size: 16px; }}
+        window.larry .subtabs button {{ padding: 6px 16px; font-size: 13px; }}
         .card-sub, .row-sub {{ color: {muted}; font-size: 12.5px; font-weight: 600; }}
         .row-title {{ font-weight: 700; font-size: 14px; }}
         .modified {{ color: {acc2}; font-size: 12px; font-weight: 800; }}
@@ -1765,6 +2256,8 @@ class Settings(Gtk.Window):
         window.larry button:disabled {{ opacity: 0.35; }}
         window.larry button image {{ color: {acc2}; }}
         window.larry .chip {{ border-radius: 999px; padding: 8px 14px; }}
+        window.larry button.primary {{ background: {acc2}; color: {on_acc}; }}
+        window.larry button.primary label {{ color: {on_acc}; }}
         window.larry .chip:checked, window.larry .segmented button:checked {{ background: {acc2}; color: {on_acc}; }}
         window.larry .chip:checked label, window.larry .segmented button:checked label,
         window.larry .chip:checked image, window.larry .segmented button:checked image {{ color: {on_acc}; }}
@@ -1787,6 +2280,8 @@ class Settings(Gtk.Window):
         .acc-name {{ font-weight: 900; font-size: 16px; }}
 
         window.larry combobox button {{ padding: 7px 14px; }}
+        window.larry popover, window.larry popover.background {{ background: {card}; color: {fg}; border: none;
+            border-radius: 22px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35); }}
         menu, .menu {{ background: {card}; color: {fg}; border: none; border-radius: 16px; padding: 6px; }}
         menuitem {{ padding: 7px 12px; border-radius: 10px; }}
         menuitem:hover {{ background: {tonal_hi}; }}
@@ -1813,7 +2308,10 @@ class Settings(Gtk.Window):
         window.larry scrollbar slider {{ background: alpha({fg}, 0.18); border-radius: 999px; min-width: 6px; border: none; }}
         window.larry scrollbar {{ background: transparent; border: none; }}
         window.larry scrolledwindow undershoot.top, window.larry scrolledwindow undershoot.bottom {{ background: none; }}
+        dialog.larry .dialog-action-area {{ padding: 0 18px 16px 18px; }}
         """
+        css += css.replace("window.larry", "dialog.larry") + css.replace("window.larry", "messagedialog.larry")
+        # (the same look for its dialogs: New theme, the delete prompts)
         if getattr(self, "css", None) is None:
             self.css = Gtk.CssProvider()
             Gtk.StyleContext.add_provider_for_screen(self.get_screen(), self.css,
@@ -1887,7 +2385,7 @@ class Settings(Gtk.Window):
         for hit in self.search_index:
             if hit["text"] is None:
                 hit["text"] = " ".join(self.label_text(hit["card"], [])).lower()
-            page_title = next(p[1] for p in PAGES if p[0] == hit["page"]).lower()
+            page_title = self.where(hit).lower()
             hay = re.findall(r"\w+", hit["text"] + " " + page_title)
             # short words have to start a word in the card ("hat" finds "hats", not "that"); longer
             # ones can be anywhere in one ("sleep" finds "asleep")
@@ -1911,14 +2409,14 @@ class Settings(Gtk.Window):
         searching = bool(query)
         for b in self.nav.values():
             b.set_visible(not searching)
+        self.nav_heading.set_visible(not searching)
         hits = self.find(query)
         for hit in hits[:12]:
             row = Gtk.ListBoxRow()
             row.hit = hit
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1, margin=8)
             box.pack_start(label(hit["title"], "row-title"), False, False, 0)
-            page = next(p[1] for p in PAGES if p[0] == hit["page"])
-            where = label(f"in {page}" + self.snippet(hit, query), "row-sub")
+            where = label(f"in {self.where(hit)}" + self.snippet(hit, query), "row-sub")
             where.set_ellipsize(3)   # Pango.EllipsizeMode.END
             box.pack_start(where, False, False, 0)
             row.add(box)
@@ -1942,13 +2440,19 @@ class Settings(Gtk.Window):
         if rows:
             self.go_to(rows[0].hit)
 
+    def where(self, hit):
+        """ "Play › Terminal": the tab and subtab a card lives in."""
+        tab = next((t for t in TABS if t[0] == hit.get("tab")), None)
+        if not tab:
+            return next(p[1] for p in PAGES if p[0] == hit["page"])
+        return f"{tab[1]} › " + next(s[1] for s in tab[4] if s[0] == hit["sub"])
+
     def go_to(self, hit):
-        """Open the card's page, scroll it into view and make it glow for a moment."""
-        self.nav[hit["page"]].set_active(True)
-        self.show_page(hit["page"])
+        """Open the card's tab and subtab, scroll it into view and make it glow for a moment."""
+        self.open_tab(hit["tab"], hit["sub"])
 
         def scroll():
-            sw, page = self.pages[hit["page"]]
+            sw, page = self.pages[(hit["tab"], hit["sub"])]
             coords = hit["card"].translate_coordinates(page, 0, 0)
             if coords:
                 adj = sw.get_vadjustment()
@@ -1974,7 +2478,7 @@ class Settings(Gtk.Window):
             self.show_page(key)
 
     def show_page(self, key):
-        _k, title, icon, sub = next(p for p in PAGES if p[0] == key)
+        _k, title, icon, sub, _subs = next(t for t in TABS if t[0] == key)
         self.stack.set_visible_child_name(key)
         self.page_title.set_markup(f'{GLib.markup_escape_text(title)}<span foreground="{hexc(self.pet.colors["accent2"])}"> •</span>')
         self.page_icon.set_from_icon_name(icon, Gtk.IconSize.MENU)
@@ -1993,6 +2497,11 @@ class Settings(Gtk.Window):
         self.size.set_value(cfg["size"])
         for key, sw in self.switches.items():
             sw.set_active(cfg[key])
+        self.set_outline_color(cfg["outline_color"])
+        self.outline_width.set_value(cfg["outline_width"])
+        for r in self.outline_rows:
+            r.set_sensitive(cfg["outline"])
+        self.sync_coat()
         self.term_switch.set_active(cfg["terminals"]["enabled"])
         self.fall_switch.set_active(cfg["fall_image"] != "none")
         for key, sw in self.beh_switches.items():
@@ -2001,6 +2510,14 @@ class Settings(Gtk.Window):
         for key, sw in self.react_switches.items():
             sw.set_active(cfg["reactions"][key])
         self.game_switch.set_active(cfg["game"])
+        self.updates_switch.set_active(cfg["updates"])
+        self.waybar_switch.set_active(cfg["waybar"])
+        self.box_switch.set_active(cfg["box_tab"])
+        self.update_box_note()
+        self.weather_switch.set_active(cfg["weather"]["enabled"])
+        self.weather_fx.set_active(cfg["weather"]["effects"])
+        if self.weather_place.get_text().strip() != cfg["weather"]["place"]:
+            self.weather_place.set_text(cfg["weather"]["place"])
         self.chat_switch.set_active(cfg["chat"]["typing"])
         self.ride_switch.set_active(cfg["ride"]["enabled"])
         for key, sw in self.dance_switches.items():
@@ -2008,7 +2525,7 @@ class Settings(Gtk.Window):
         self.ride_buttons[cfg["ride"]["vehicle"]].set_active(True)
         self.ride_every.set_value(cfg["ride"]["every"])
         self.chat_every.set_value(cfg["chat"]["every"])
-        self.theme_buttons[cfg["theme"]].set_active(True)
+        self.theme_buttons.get(cfg["theme"], self.theme_buttons[themes.DEFAULT]).set_active(True)
         self.match_switch.set_active(cfg["box"]["match_theme"])
         self.pet_sound_switch.set_active(cfg["pet_sounds"])
         self.show_fall_image()
@@ -2030,8 +2547,6 @@ class Settings(Gtk.Window):
         self.syncing = False
         self.room.select(self.room.sel, notify=False)
         self.update_acc_controls()
-        self.scene_ed.select(self.scene_ed.sel, notify=False)
-        self.update_deco_controls()
         self.refresh()
 
     def apply(self):
@@ -2063,7 +2578,6 @@ class Settings(Gtk.Window):
         self.zoom_sprites = None
         self.anchor = None
         self.room.queue_draw()
-        self.scene_ed.queue_draw()
         for pics in self.choice_pics.values():
             for pic in pics:
                 pic.queue_draw()
@@ -2089,6 +2603,7 @@ class Settings(Gtk.Window):
         # images without transparency almost always want their background cut out
         self.switches["remove_bg"].set_active(not sprites.has_transparency(path))
         self.apply()
+        self.sync_coat()
 
     def on_name(self, entry):
         if self.syncing:
@@ -2107,6 +2622,7 @@ class Settings(Gtk.Window):
             sw.set_active(self.cfg[key])
         self.syncing = False
         self.apply()
+        self.sync_coat()
 
     def on_size(self, scale):
         if self.syncing:
@@ -2226,7 +2742,7 @@ class Settings(Gtk.Window):
         cr.save()
         cr.translate(w / 2 - (x0 + x1) / 2 * L, h - 8)
         vehicles.draw(cr, key, L, lambda: pet.draw_rider(cr, key, L, 1, frame), t, dist, live,
-                      head=pet.rider_head(key), pedal=pet.pedal_length(), halo=self.cfg["outline"])
+                      head=pet.rider_head(key), pedal=pet.pedal_length(), **pet.halo())
         cr.restore()
 
     def on_reset_best(self, _b):
@@ -2269,7 +2785,158 @@ class Settings(Gtk.Window):
         self.cfg["terminals"]["classes"] = [c.strip() for c in entry.get_text().split(",") if c.strip()]
         self.scene_apply_soon()   # saves once you pause typing
 
+    # ── weather ─────────────────────────────────────────────────────────────
+    def on_weather_key(self, sw, _p, key):
+        if not self.syncing and self.cfg["weather"][key] != sw.get_active():
+            self.cfg["weather"][key] = sw.get_active()
+            if key == "enabled" and sw.get_active() and not self.cfg["weather"]["place"]:
+                self.weather_status.set_text("Now type your town and press Find")
+            self.apply()
+
+    def on_weather_find(self, _w):
+        name = self.weather_place.get_text().strip()
+        if not name:
+            return
+        self.weather_status.set_text(f"Looking up {name}…")
+
+        def work():
+            try:
+                res = weather.geocode(name)
+            except weather.WeatherError as e:
+                res = e
+            GLib.idle_add(done, res)
+
+        def done(res):
+            if isinstance(res, Exception):
+                self.weather_status.set_text(f"Hmm: {res}")
+                self.sound.play("grab")
+                return False
+            label_, lat, lon = res
+            self.cfg["weather"].update(place=label_, lat=round(lat, 4), lon=round(lon, 4), enabled=True)
+            was, self.syncing = self.syncing, True
+            self.weather_place.set_text(label_)
+            self.weather_switch.set_active(True)
+            self.syncing = was
+            self.weather_status.set_text(f"Found {self.place_or_hidden(label_)}. Checking its weather…")
+            self.sound.play("on")
+            self.apply()                       # (the pet fetches the weather when this changes)
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_place(self, shown):
+        """Show or hide your town (it starts hidden each time the settings open)."""
+        self.place_shown = shown
+        e = self.weather_place
+        e.set_visibility(shown)
+        e.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY,
+                                  "view-conceal-symbolic" if shown else "view-reveal-symbolic")
+        e.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, "Hide your town" if shown else "Show your town")
+        if hasattr(self, "weather_status"):
+            self.show_weather()
+
+    def place_or_hidden(self, place):
+        return place if self.place_shown else "your town"
+
+    def on_weather_try(self, b, key):
+        if b.get_active():
+            self.pet.weather_try = key
+            self.pet.apply_weather()
+            if key and self.pet.mode == "box":
+                self.pet.peek(4)                # open the box so you see it rain / snow
+
+    def show_weather(self):
+        """The pet's latest weather, in words (it calls this when it changes)."""
+        pet, wc = self.pet, self.cfg["weather"]
+        if pet.weather_try:
+            w = weather.SAMPLES[pet.weather_try]
+            text = f"Trying {pet.weather_try}: "
+        elif not wc["enabled"]:
+            self.weather_status.set_text("")
+            return
+        elif not wc["place"]:
+            self.weather_status.set_text("Type your town and press Find")
+            return
+        elif pet.weather is None:
+            self.weather_status.set_text(f"Couldn't get the weather for {self.place_or_hidden(wc['place'])} yet")
+            return
+        else:
+            w = pet.weather
+            text = weather.describe(w, wc["place"] if self.place_shown else "") + ". "
+        outfit = [{"umbrella_hat": "umbrella hat", "scarf": "scarf"}[k] for k in weather.wear(w)]
+        text += (f"{self.cfg['name']} has the {' and '.join(outfit)} on" if outfit
+                 else f"{self.cfg['name']} doesn't need anything extra")
+        self.weather_status.set_text(text)
+
+    def on_box_tab(self, sw, _p):
+        if not self.syncing and self.cfg["box_tab"] != sw.get_active():
+            self.cfg["box_tab"] = sw.get_active()
+            self.apply()
+        self.update_box_note()
+
+    def update_box_note(self):
+        if self.cfg["box_tab"]:
+            text = ""
+        elif self.cfg["waybar"]:
+            text = "Click your pet's square in Waybar to bring it out or tuck it away"
+        else:
+            text = ("Your pet stays out on the desktop. Tip: turn on the Waybar module (Box → Waybar) to tuck it away "
+                    "and bring it back. Right-click your pet any time for these settings")
+        self.box_note.set_text(text)
+        self.box_note.set_visible(bool(text))
+
+    # ── updates ─────────────────────────────────────────────────────────────
+    def show_update(self):
+        new = updates.available()
+        if new:
+            self.update_text.set_markup(f"<b>v{new['version']} is out!</b>  You have v{VERSION}")
+            for child in self.update_bar.get_children():    # (show_all() skips a no-show-all widget)
+                child.show()
+            self.update_bar.show()
+            self.update_status.set_text(f"v{new['version']} is out (you have v{VERSION})")
+        else:
+            self.update_bar.hide()
+            st = updates.load_state()
+            when = ""
+            if st.get("checked"):
+                mins = (time.time() - st["checked"]) / 60
+                when = " · checked " + ("just now" if mins < 2 else f"{int(mins)} min ago" if mins < 90
+                                        else f"{int(mins / 60)} h ago")
+            self.update_status.set_text(f"You're on v{VERSION}, the latest{when}" if st.get("latest")
+                                        else f"You're on v{VERSION}")
+
+    def on_check_updates(self, _b):
+        self.update_status.set_text("Checking…")
+
+        def done(res):
+            if isinstance(res, Exception):
+                self.update_status.set_text(f"Couldn't check: {res}")
+            else:
+                self.show_update()
+        self.pet.check_updates(force=True, done=done)
+
+    def on_update(self, _b):
+        if updates.run_installer(self.cfg["terminals"]["classes"]):
+            self.update_text.set_markup("<b>Updating in a terminal…</b>  Your pet restarts when it's done")
+        else:
+            clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+            clip.set_text(updates.INSTALL, -1)
+            self.update_text.set_markup("<b>Couldn't open a terminal.</b>  The update command is copied: "
+                                        "paste it into one")
+
+    def on_waybar(self, sw, _p):
+        if self.syncing or self.cfg["waybar"] == sw.get_active():
+            return
+        on = sw.get_active()
+        ok, msg = waybar.install() if on else waybar.remove()
+        self.waybar_status.set_text(msg)       # (when it couldn't edit your config: where the module is)
+        self.cfg["waybar"] = on                 # stays on even then: add it by hand and it just works
+        self.apply()
+        self.update_box_note()
+
     def on_switch(self, sw, _param, key):
+        if key == "outline":
+            for r in getattr(self, "outline_rows", []):
+                r.set_sensitive(sw.get_active())
         if not self.syncing and self.cfg[key] != sw.get_active():
             self.cfg[key] = sw.get_active()
             self.apply()
@@ -2285,7 +2952,7 @@ class Settings(Gtk.Window):
             self.cfg["box"][key] = value
             if key == "background":
                 self.update_sky_controls()
-            self.scene_ed.queue_draw()
+            self.preview.queue_draw()
             if soon:
                 self.scene_apply_soon()
             else:
@@ -2434,7 +3101,36 @@ class Settings(Gtk.Window):
         self.load_anim_controls()
         self.apply()
 
+    # ── the welcome (first run) ─────────────────────────────────────────────
+    def welcome(self, tour_only=False):
+        if self.welcome_layer:
+            return
+        self.welcome_layer = onboarding.Welcome(self, lambda name: self.on_welcomed(name, tour_only), tour_only)
+        self.overlay.add_overlay(self.welcome_layer)
+        self.welcome_layer.show_all()
+
+    def on_welcomed(self, name, tour_only):
+        layer, self.welcome_layer = self.welcome_layer, None
+        if layer:
+            layer.stop()
+            self.overlay.remove(layer)
+            layer.destroy()
+        if tour_only:
+            return
+        if name and name != self.cfg["name"]:
+            self.cfg["name"] = name
+            was, self.syncing = self.syncing, True
+            self.name_entry.set_text(name)
+            self.syncing = was
+            self.brand.set_text(name)
+            self.set_title(f"{name} settings")
+            self.apply()
+        account.welcomed(self.cfg["name"])
+        self.brand_sub.set_text(account.since_text() or "settings")
+
     def on_destroy(self, *_):
+        if self.welcome_layer:
+            self.welcome_layer.stop()
         GLib.source_remove(self.ticker)
         for t in (self.size_timer, self.saved_timer, self.acc_timer, self.scene_timer):
             if t:
@@ -2442,10 +3138,21 @@ class Settings(Gtk.Window):
         self.sound.close()
         Gtk.StyleContext.remove_provider_for_screen(self.get_screen(), self.css)
         self.pet.settings = None
+        if self.pet.weather_try:            # "Try it" only lasts while the settings are open
+            self.pet.weather_try = None
+            self.pet.apply_weather()
 
     # ── drawing ─────────────────────────────────────────────────────────────
     def fit_preview(self):
-        self.preview.set_size_request(-1, round(self.pet.box_h * ZOOM) + 44)
+        h = round(self.pet.box_h * ZOOM) + 44
+        pet = self.pet
+        base = (pet.cfg["size"], pet.cfg["image"], pet.cfg["outline_width"], repr(pet.cfg["accessories"]),
+                pet.ground)                            # what sizes him apart from the weather
+        weathery = pet.weather_try or pet.cfg["weather"]["enabled"]
+        if weathery and base == getattr(self, "fit_base", None):
+            h = max(h, self.fit_h)                     # outfits come and go: don't shrink, so the page
+        self.fit_base, self.fit_h = base, h            # doesn't jump about under your cursor
+        self.preview.set_size_request(-1, h)
         self.preview.queue_draw()
 
     def animate(self):
@@ -2453,58 +3160,93 @@ class Settings(Gtk.Window):
         a = self.pet.anim
         sprite = self.pet.sprites[0]
         span = max(self.pet.box_w - sprite.get_width() - 12, 1)
+        look = (self.pet.box_w, self.pet.box_h, self.pet.sprites[0])
+        if look != getattr(self, "preview_look", None):   # the pet or its box changed size: redraw it all
+            self.preview_look = look
+            self.refresh()
+        before = self.preview_pet_rect()
         self.px += self.pdir * a.walk_speed / 30
         if self.px <= 0 or self.px >= span:
             self.px = min(max(self.px, 0), span)
             self.pdir *= -1
         self.phase += a.walk_speed / 30 / a.step_length
-        if self.play_start is not None and time.monotonic() - self.play_start > a.open_time + 0.6:
-            self.play_start = None   # hold fully open a moment, then end the test
-        self.preview.queue_draw()
-        self.avatar.queue_draw()
-        if self.stack.get_visible_child_name() == "anim":
+        if self.play_start is not None or self.pet.weather_effect():
+            if self.play_start is not None and time.monotonic() - self.play_start > a.open_time + 0.6:
+                self.play_start = None   # hold fully open a moment, then end the test
+            self.preview.queue_draw()    # the whole box moves (or rain / snow falls all over it)
+        else:                            # only where the pet was and is now (the box doesn't change)
+            for x, y, w, h in (before, self.preview_pet_rect()):
+                self.preview.queue_draw_area(x, y, w, h)
+        self.avatar_frame = not getattr(self, "avatar_frame", False)
+        if self.avatar_frame:            # a 2 px bob: half the frame rate is plenty
+            self.avatar.queue_draw()
+        if self.current() == ("play", "anim"):
             self.editor.queue_draw()
         return True
+
+    def preview_pet_rect(self):
+        """Where the walking pet is in the preview (widget px), with room for its lean and hop."""
+        pet = self.pet
+        sw, sh = sprites.logical_size(self.pet_sprites()[0])
+        w = self.preview.get_allocated_width()
+        bx = round((w - pet.box_w * ZOOM) / 2) / ZOOM
+        feet = pet.box_h - pet.ground + (4 if pet.ground else 1)
+        m = max(sw, sh) * 0.35 + 4
+        x0, y0 = bx + 6 + self.px - m, feet - sh - m
+        return (math.floor(x0 * ZOOM), math.floor(y0 * ZOOM), math.ceil((sw + 2 * m) * ZOOM) + 2,
+                math.ceil((sh + 2 * m) * ZOOM) + 2)
 
     def pet_sprites(self):
         """Sharper sprites for the zoomed preview (rebuilt when the pet changes)."""
         if self.zoom_sprites is None:
             try:
-                self.zoom_sprites = sprites.load(self.pet.cfg, ZOOM)
+                self.zoom_sprites = sprites.load(self.pet.dress(self.pet.cfg), ZOOM)   # (weather outfit too)
             except Exception:
                 self.zoom_sprites = sprites.load(config.DEFAULTS, ZOOM)
         return self.zoom_sprites
 
+    def preview_backdrop(self, cr, w, h, c):
+        """The preview's card, dotted grid and LIVE badge: drawn once and reused (the preview
+        repaints 30 times a second; hundreds of little dots each time added up)."""
+        key = (w, h, tuple(c["bg1"]), tuple(c["fg"]), tuple(c["accent2"]))
+        if getattr(self, "backdrop", None) is None or self.backdrop[0] != key:
+            surf = cr.get_target().create_similar(cairo.CONTENT_COLOR_ALPHA, w, h)
+            b = cairo.Context(surf)
+            rounded(b, 0, 0, w, h, 24)
+            b.clip()
+            b.set_source_rgb(*c["bg1"])
+            b.paint()
+            b.set_source_rgba(*c["fg"], 0.07)
+            for x in range(14, w, 20):
+                for y in range(14, h, 20):
+                    b.new_sub_path()
+                    b.arc(x, y, 1, 0, 2 * math.pi)
+            b.fill()                         # (all the dots in one go)
+            b.select_font_face(fonts.FAMILY, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            b.set_font_size(11)
+            text = "LIVE PREVIEW"
+            tw = b.text_extents(text).x_advance
+            rounded(b, 14, h - 34, tw + 34, 22, 11)
+            b.set_source_rgb(*scene.mix(c["bg1"], c["accent2"], 0.18))
+            b.fill()
+            b.set_source_rgb(*c["accent2"])
+            b.arc(27, h - 23, 3.5, 0, 2 * math.pi)
+            b.fill()
+            b.move_to(37, h - 19)
+            b.show_text(text)
+            self.backdrop = (key, surf)
+        cr.set_source_surface(self.backdrop[1], 0, 0)
+        cr.paint()
+        rounded(cr, 0, 0, w, h, 24)
+        cr.clip()
+
     def draw_preview(self, area, cr):
         w, h = area.get_allocated_width(), area.get_allocated_height()
         c, pet = self.pet.colors, self.pet
-
-        # backdrop: a card with a faint dotted grid, like a little desktop
-        rounded(cr, 0, 0, w, h, 24)
-        cr.clip()
-        cr.set_source_rgb(*c["bg1"])
-        cr.paint()
-        cr.set_source_rgba(*c["fg"], 0.07)
-        for x in range(14, w, 20):
-            for y in range(14, h, 20):
-                cr.arc(x, y, 1, 0, 2 * math.pi)
-                cr.fill()
-        # live badge: a little pill in the corner
-        cr.select_font_face(fonts.FAMILY, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-        cr.set_font_size(11)
-        text = "LIVE PREVIEW"
-        tw = cr.text_extents(text).x_advance
-        rounded(cr, 14, h - 34, tw + 34, 22, 11)
-        cr.set_source_rgb(*scene.mix(c["bg1"], c["accent2"], 0.18))
-        cr.fill()
-        cr.set_source_rgb(*c["accent2"])
-        cr.arc(27, h - 23, 3.5, 0, 2 * math.pi)
-        cr.fill()
-        cr.move_to(37, h - 19)
-        cr.show_text(text)
+        self.preview_backdrop(cr, w, h, c)
 
         bw, bh = pet.box_w, pet.box_h
-        bx = (w / ZOOM - bw) / 2
+        bx = round((w - bw * ZOOM) / 2) / ZOOM   # on a whole pixel: the cached box then copies 1:1
         by, stretch = 0, 1
         if self.play_start is not None:     # test playback of the box-open curve
             t = min((time.monotonic() - self.play_start) / pet.anim.open_time, 1)
@@ -2517,6 +3259,7 @@ class Settings(Gtk.Window):
         sw, _sh = sprites.logical_size(sprite)
 
         def pet_in_box(cr):
+            pet.draw_weather(cr, bx, by, bw, bh, time.monotonic())   # rain / snow, as in the real box
             tilt, bob, squash = pet.anim.pose(self.phase, True)
             feet = by + bh - pet.ground + (4 if pet.ground else 1)
             sprites.draw_pet(cr, sprite, bx + 6 + self.px + sw / 2, feet, tilt * self.pdir, bob, squash)
@@ -2600,40 +3343,16 @@ class Settings(Gtk.Window):
         cr.scale(k, k)
         accessories.paint(cr, acc_id)
 
-    def draw_deco_tile(self, cr, w, h, kind):
-        c = self.pet.colors
-        rounded(cr, 0, 0, w, h, 14)
-        cr.clip()
-        cr.set_source_rgba(*c["fg"], 0.05)
-        cr.paint()
-        x0, y0, x1, y1 = scene.bounds(kind)
-        k = min((w - 16) / (x1 - x0), (h - 12) / (y1 - y0))
-        cr.translate(w / 2 - (x0 + x1) / 2 * k, h / 2 - (y0 + y1) / 2 * k)
-        cr.scale(k, k)
-        p = scene.palette(c, self.cfg["box"]["colors"])
-        scene.paint_deco(cr, {"kind": kind, "seed": 7}, p, self.cfg["box"]["background"] == "night")
-
     def draw_tile(self, cr, w, h, ground=None, background=None, colors=None):
         """A mini box showing one option, otherwise using the current settings."""
         b = dict(self.cfg["box"])
         b["ground_height"] = min(b["ground_height"], 18)
-
-        def at(kind, x, y=None, seed=3):
-            it = scene.new_item(kind, random.Random(seed))
-            it["x"] = x
-            if y is not None:
-                it["y"] = y
-            return it
         if ground:
-            b.update(ground=ground, items=[])
+            b["ground"] = ground
         if background:
-            sky = {"day": [at("sun", 0.85, 32), at("clouds", 0.3, 26)],
-                   "sunset": [at("sun", 0.85, 32), at("clouds", 0.3, 26)],
-                   "night": [at("sun", 0.85, 32), at("stars", 0.3, 24), at("stars", 0.55, 30, 5)]}
-            b.update(background=background, items=sky.get(background, []))
+            b["background"] = background
         if colors:
-            b.update(colors=colors, ground="grass", ground_height=12,
-                     items=[at("tree", 0.2), at("flowers", 0.55), at("mushrooms", 0.8), at("sun", 0.85, 32)])
+            b.update(colors=colors, ground="grass", ground_height=12)
         rounded(cr, 0, 0, w, h, 14)
         cr.clip()
         cr.set_source_rgba(*self.pet.colors["fg"], 0.05)

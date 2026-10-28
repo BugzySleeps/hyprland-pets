@@ -689,8 +689,109 @@ def new_season():
     return None
 
 
+# ── weather: put on by the pet itself when it rains, snows or gets cold (never in your wardrobe) ──
+def umbrella_hat(cr):
+    """A little umbrella on a headband: keeps the rain off without needing hands."""
+    red, white = (0.92, 0.27, 0.3), (0.98, 0.97, 0.95)
+    cr.move_to(0, -0.02)                                  # the pole
+    cr.line_to(0, 0.33)
+    cr.set_source_rgb(*INK)
+    cr.set_line_width(LW * 1.6)
+    cr.stroke()
+    n = 6                                                 # canopy: panels in two colours, scalloped edge
+    for i in range(n):
+        a0, a1 = math.pi + i * math.pi / n, math.pi + (i + 1) * math.pi / n
+        cr.move_to(0, -0.06)
+        cr.line_to(0.5 * math.cos(a0), -0.06 + 0.4 * math.sin(a0))
+        cr.line_to(0.5 * math.cos(a1), -0.06 + 0.4 * math.sin(a1))
+        cr.close_path()
+        cr.set_source_rgb(*(red if i % 2 else white))
+        cr.fill()
+    cr.move_to(-0.5, -0.06)
+    cr.curve_to(-0.5, -0.56, 0.5, -0.56, 0.5, -0.06)
+    for i in range(n):                                    # the scallops along the bottom
+        x0 = 0.5 - i / n
+        x1 = 0.5 - (i + 1) / n
+        cr.curve_to(x0 - 0.02, 0.0, x1 + 0.02, 0.0, x1, -0.06)
+    cr.close_path()
+    cr.set_source_rgb(*INK)
+    cr.set_line_width(LW)
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    cr.stroke()
+    circle(cr, 0, -0.42, 0.035)                           # the tip
+    inked(cr, INK, LW * 0.6)
+    ellipse(cr, 0, 0.36, 0.2, 0.065)                      # headband
+    inked(cr, (0.24, 0.24, 0.3))
+
+
+def scarf(cr):
+    """A chunky knitted scarf seen from the side: wrapped down the neck (from the back of it to the
+    chest), one end hanging down over the chest with a fringe. Drawn for Larry's neck, which runs
+    down the left of his big head."""
+    red, dark = (0.86, 0.22, 0.26), (0.62, 0.12, 0.17)
+    # the hanging end, behind the wrap
+    cr.move_to(0.02, 0.18)
+    cr.curve_to(0.0, 0.36, 0.04, 0.52, 0.1, 0.66)
+    cr.line_to(0.32, 0.6)
+    cr.curve_to(0.26, 0.46, 0.24, 0.32, 0.26, 0.16)
+    cr.close_path()
+    inked(cr, red)
+    cr.set_source_rgba(1, 1, 1, 0.9)                      # two stripes across it
+    cr.set_line_width(0.045)
+    for t in (0.38, 0.5):
+        cr.move_to(0.03 + t * 0.06, t)
+        cr.line_to(0.27 + t * 0.03, t - 0.04)
+    cr.stroke()
+    cr.set_source_rgb(*INK)                               # fringe
+    cr.set_line_width(LW * 0.8)
+    for k in range(5):
+        x = 0.12 + k * 0.045
+        cr.move_to(x, 0.66 - k * 0.012)
+        cr.line_to(x - 0.01, 0.75 - k * 0.012)
+    cr.stroke()
+    # the wrap: a thick band down the neck, curving forward onto the chest
+    cr.move_to(-0.36, -0.62)
+    cr.curve_to(-0.12, -0.7, 0.02, -0.66, 0.12, -0.58)    # top (back of the neck)
+    cr.curve_to(0.24, -0.3, 0.34, -0.02, 0.44, 0.2)       # front edge, down to the chest
+    cr.curve_to(0.28, 0.32, 0.02, 0.32, -0.12, 0.24)      # bottom
+    cr.curve_to(-0.2, -0.04, -0.3, -0.34, -0.36, -0.62)   # back edge
+    cr.close_path()
+    inked(cr, red)
+    cr.set_source_rgba(*dark, 0.9)                        # knit ridges across the band
+    cr.set_line_width(LW * 0.75)
+    for k in range(1, 8):
+        t = k / 8
+        ax, ay = -0.36 + 0.24 * t, -0.62 + 0.86 * t
+        bx, by = 0.12 + 0.32 * t, -0.58 + 0.78 * t
+        cr.move_to(ax + 0.03, ay + 0.01)
+        cr.curve_to(ax + 0.12, ay + 0.05, bx - 0.12, by + 0.04, bx - 0.03, by)
+    cr.stroke()
+
+
+WEATHER = {   # id: (title, aspect, painter, placement on Larry)
+    "umbrella_hat": ("Umbrella hat", 0.9, umbrella_hat, (0.7, -0.05, 0.66)),
+    "scarf": ("Scarf", 1.5, scarf, (0.55, 0.555, 0.27)),
+}
+HATS = {"top_hat", "party_hat", "crown", "cowboy", "beanie", "wizard", "chef", "grad_cap", "viking", "halo",
+        "horns", "witch_hat", "santa_hat", "lucky_hat", "bunny_ears", "antlers", "pumpkin", "heart_boppers"}
+
+
+def is_hat(acc_id, place, anchor=LARRY_ANCHOR):
+    """Worn on top of the head? The built-in hats, or one of your own pictures sitting up there
+    (its middle above the top of the head, give or take)."""
+    if acc_id in HATS:
+        return True
+    if _entry_builtin(acc_id):
+        return False
+    return place.get("y", 1) < anchor[1] + 0.02 and abs(place.get("x", 0) - anchor[0]) < 0.3
+
+
+def _entry_builtin(acc_id):
+    return PREMADE.get(acc_id) or SEASONAL.get(acc_id) or WEATHER.get(acc_id)
+
+
 def _entry(acc_id):
-    return PREMADE.get(acc_id) or SEASONAL.get(acc_id)
+    return _entry_builtin(acc_id)
 
 
 # ── your own pictures (~/.config/larry/accessories/) ────────────────────────
