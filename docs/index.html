@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hyprland-pets</title>
+<meta name="description" content="A little cow that lives on your Hyprland desktop. Drag him out, throw him, pet him, dress him up.">
+<meta property="og:title" content="hyprland-pets">
+<meta property="og:description" content="A little cow that lives on your Hyprland desktop.">
+<meta property="og:image" content="https://bugzysleeps.github.io/hyprland-pets/showcase.jpg">
+<link rel="icon" href="site/larry.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg0: #111216; --bg1: #1b1d23; --bg2: #23262e; --fg: #e6e8ee; --muted: #9aa0ad;
+  --accent: #8ab4f8; --accent-ink: #0d1424; --line: rgba(255,255,255,.08); --shadow: rgba(0,0,0,.45);
+  --code: #0c0d10;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg0: #eef0f4; --bg1: #ffffff; --bg2: #f3f5f9; --fg: #1d2026; --muted: #5d6472;
+    --accent: #3b82f6; --accent-ink: #ffffff; --line: rgba(0,0,0,.08); --shadow: rgba(30,40,70,.18);
+    --code: #1b1d23;
+  }
+}
+:root[data-theme="dark"] {
+  --bg0: #111216; --bg1: #1b1d23; --bg2: #23262e; --fg: #e6e8ee; --muted: #9aa0ad;
+  --accent: #8ab4f8; --accent-ink: #0d1424; --line: rgba(255,255,255,.08); --shadow: rgba(0,0,0,.45);
+  --code: #0c0d10;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--bg0); color: var(--fg);
+  font-family: Nunito, system-ui, sans-serif; font-size: 17px; line-height: 1.55;
+  overflow-x: hidden;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
+
+/* ── header ───────────────────────────────────────── */
+header.top {
+  position: relative; z-index: 5; display: flex; align-items: center; justify-content: space-between;
+  max-width: 1080px; margin: 0 auto; padding: 18px 16px;
+}
+.logo { display: flex; align-items: center; gap: 10px; font-weight: 900; font-size: 20px; color: var(--fg); }
+.logo img { width: 30px; height: auto; }
+.logo:hover { text-decoration: none; }
+nav.links { display: flex; gap: 22px; font-weight: 700; font-size: 15px; }
+nav.links a { color: var(--muted); }
+nav.links a:hover { color: var(--fg); text-decoration: none; }
+@media (max-width: 640px) { nav.links .opt { display: none; } nav.links { gap: 14px; } .logo { font-size: 17px; white-space: nowrap; } }
+
+/* ── the box, hanging from the top of the page ───── */
+#box {
+  position: fixed; top: 0; left: 50%; width: 380px; max-width: calc(100vw - 32px); height: 128px;
+  transform: translate(-50%, -100%); transition: transform .38s cubic-bezier(.3,1.4,.5,1);
+  background: linear-gradient(var(--bg1), var(--bg2)); border-radius: 0 0 18px 18px;
+  box-shadow: 0 10px 30px var(--shadow), inset 0 10px 10px -10px rgba(0,0,0,.4);
+  z-index: 40; overflow: hidden;
+}
+#box.open { transform: translate(-50%, 0); }
+#box .floor {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 16px;
+  background: linear-gradient(color-mix(in srgb, var(--accent) 55%, var(--bg1)), color-mix(in srgb, var(--accent) 35%, var(--bg1)));
+  border-radius: 50% 50% 0 0 / 5px 5px 0 0;
+}
+#box .hill {
+  position: absolute; left: -10%; right: -10%; bottom: 8px; height: 26px; border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg1));
+}
+#tab {
+  position: fixed; top: 0; left: 50%; width: 52px; height: 15px; transform: translateX(-50%);
+  background: var(--bg1); border-radius: 0 0 8px 8px; z-index: 46; cursor: pointer;
+  box-shadow: 0 3px 10px var(--shadow); transition: top .38s cubic-bezier(.3,1.4,.5,1);
+}
+#tab::after {
+  content: ""; position: absolute; left: 50%; top: 6px; width: 18px; height: 3px; margin-left: -9px;
+  border-radius: 2px; background: var(--muted); opacity: .6;
+}
+#tab.pinned::after { background: var(--accent); opacity: 1; }
+#box.open + #tab { top: 128px; }
+#score {
+  position: absolute; right: 12px; top: 10px; font-weight: 800; font-size: 13px; padding: 2px 10px;
+  border-radius: 999px; background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg);
+}
+
+/* ── the pet ──────────────────────────────────────── */
+#pet {
+  position: fixed; left: 0; top: 0; z-index: 50; cursor: grab; touch-action: none; user-select: none;
+  -webkit-user-drag: none; will-change: transform;
+  filter: drop-shadow(1.4px 0 0 #fff) drop-shadow(-1.4px 0 0 #fff) drop-shadow(0 1.4px 0 #fff) drop-shadow(0 -1.4px 0 #fff)
+          drop-shadow(0 3px 4px rgba(0,0,0,.25));
+}
+#pet.held { cursor: grabbing; }
+#pet canvas { display: block; }
+.popup {
+  position: fixed; z-index: 60; pointer-events: none; font-weight: 900; font-size: 18px; color: var(--fg);
+  background: var(--bg1); padding: 2px 12px; border-radius: 999px; box-shadow: 0 4px 14px var(--shadow);
+  animation: rise 1.1s ease-out forwards;
+}
+.popup.big { background: var(--accent); color: var(--accent-ink); }
+.heart { position: fixed; z-index: 60; pointer-events: none; color: #f2546f; font-size: 18px; animation: rise 1.2s ease-out forwards; }
+@keyframes rise { from { opacity: 0; transform: translate(-50%, 6px) scale(.7); } 15% { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -46px) scale(1); } }
+
+/* ── hero ─────────────────────────────────────────── */
+.hero { padding: 70px 16px 40px; text-align: center; }
+.hero h1 { font-size: clamp(44px, 9vw, 92px); line-height: 1; margin: 0 0 18px; font-weight: 900; letter-spacing: -1.5px; }
+.hero h1 span { color: var(--accent); }
+.hero p.sub { font-size: clamp(18px, 2.4vw, 22px); color: var(--muted); max-width: 640px; margin: 0 auto 30px; }
+.cmd {
+  display: flex; align-items: center; gap: 10px; max-width: 760px; margin: 0 auto 18px; padding: 8px 8px 8px 18px;
+  background: var(--code); color: #d6e2ff; border-radius: 16px; box-shadow: 0 8px 24px var(--shadow);
+  font: 600 14px/1.4 ui-monospace, "JetBrains Mono", "DejaVu Sans Mono", monospace; text-align: left;
+}
+.card.cmd { background: var(--code); padding: 8px 8px 8px 18px; }
+.cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+.cmd code::-webkit-scrollbar { display: none; }
+.cmd .dollar { color: #6ee7b7; margin-right: 8px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px; border: 0; cursor: pointer; font: 800 15px Nunito, sans-serif;
+  padding: 10px 18px; border-radius: 999px; background: var(--bg2); color: var(--fg); transition: transform .15s, background .15s;
+}
+.btn:hover { transform: translateY(-1px); text-decoration: none; background: color-mix(in srgb, var(--accent) 18%, var(--bg2)); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover { background: color-mix(in srgb, var(--accent) 85%, #fff); }
+.cmd .btn { padding: 8px 14px; font-size: 14px; flex: none; }
+.actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.hint { margin-top: 28px; color: var(--muted); font-weight: 700; font-size: 15px; }
+.hint b { color: var(--fg); }
+
+/* ── sections ─────────────────────────────────────── */
+section { padding: 56px 0; }
+h2 { font-size: clamp(30px, 4.4vw, 42px); margin: 0 0 8px; font-weight: 900; letter-spacing: -.5px; }
+.lead { color: var(--muted); margin: 0 0 30px; max-width: 640px; }
+.card { background: var(--bg1); border-radius: 22px; padding: 22px; box-shadow: 0 1px 0 var(--line) inset; }
+.video {
+  position: relative; border-radius: 22px; overflow: hidden; background: #000; aspect-ratio: 16/9;
+  box-shadow: 0 16px 40px var(--shadow);
+}
+.video video { width: 100%; height: 100%; display: block; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.feature h3 { margin: 8px 0 4px; font-size: 19px; font-weight: 900; }
+.feature p { margin: 0; color: var(--muted); font-size: 15.5px; }
+.feature .ico {
+  width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; font-size: 20px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg1));
+}
+.shots { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.shots figure { margin: 0; }
+.shots img { width: 100%; display: block; border-radius: 16px; box-shadow: 0 10px 26px var(--shadow); cursor: zoom-in; }
+.shots figcaption { color: var(--muted); font-weight: 700; font-size: 14px; margin-top: 8px; }
+
+.make { display: grid; gap: 24px; grid-template-columns: 1fr 1fr; align-items: center; }
+@media (max-width: 760px) { .make { grid-template-columns: 1fr; } }
+.stage {
+  height: 300px; border-radius: 22px; position: relative; overflow: hidden;
+  background: radial-gradient(circle at 70% 20%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 60%), var(--bg1);
+  display: grid; place-items: center;
+}
+.stage canvas { width: 230px; height: auto;
+  filter: drop-shadow(3px 0 0 #fff) drop-shadow(-3px 0 0 #fff) drop-shadow(0 3px 0 #fff) drop-shadow(0 -3px 0 #fff); }
+.pickers { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
+.pickers label { display: flex; align-items: center; gap: 10px; font-weight: 800; background: var(--bg1); padding: 8px 14px 8px 8px; border-radius: 999px; cursor: pointer; }
+.pickers input[type=color] { width: 34px; height: 34px; border: 0; padding: 0; border-radius: 50%; background: none; cursor: pointer; }
+.pickers input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+.pickers input[type=color]::-webkit-color-swatch { border-radius: 50%; border: 2px solid var(--line); }
+.pickers input[type=color]::-moz-color-swatch { border-radius: 50%; border: 2px solid var(--line); }
+.presets { display: flex; gap: 10px; flex-wrap: wrap; }
+.preset { width: 40px; height: 40px; border-radius: 50%; border: 3px solid var(--bg1); cursor: pointer; box-shadow: 0 0 0 1px var(--line); padding: 0; }
+.preset:hover { transform: scale(1.08); }
+
+table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+td { padding: 10px 12px; border-top: 1px solid var(--line); vertical-align: top; }
+td:first-child { font-weight: 800; white-space: nowrap; width: 1%; }
+td code { font-size: 13px; color: var(--muted); word-break: break-word; }
+details { background: var(--bg1); border-radius: 18px; padding: 16px 20px; margin-bottom: 12px; }
+summary { font-weight: 800; cursor: pointer; }
+details p { color: var(--muted); margin: 10px 0 0; }
+
+footer { padding: 50px 0 70px; color: var(--muted); font-size: 15px; }
+footer .note { background: var(--bg1); border-radius: 22px; padding: 22px; margin-bottom: 22px; }
+footer .note b { color: var(--fg); }
+.lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.82); display: none; place-items: center; z-index: 100; padding: 16px; cursor: zoom-out; }
+.lightbox.on { display: grid; }
+.lightbox img { max-width: 100%; max-height: 92vh; border-radius: 14px; }
+@media (prefers-reduced-motion: reduce) { #box, #tab { transition: none; } .popup, .heart { animation-duration: .01s; } }
+</style>
+</head>
+<body>
+
+<div id="box"><div class="hill"></div><div class="floor"></div><div id="score" hidden></div></div>
+<div id="tab" title="Larry's box: hover to open, click to keep it open"></div>
+<div id="pet" aria-label="Larry the cow: drag him around"><canvas id="sprite"></canvas></div>
+
+<header class="top">
+  <a class="logo" href="#"><img src="site/larry.png" alt="">hyprland-pets</a>
+  <nav class="links">
+    <a class="opt" href="#features">Features</a>
+    <a class="opt" href="#colours">Make him yours</a>
+    <a href="#install">Install</a>
+    <a href="https://github.com/BugzySleeps/hyprland-pets">GitHub</a>
+  </nav>
+</header>
+
+<main>
+<div class="wrap hero">
+  <h1>Your desktop<br>needs a <span>cow</span>.</h1>
+  <p class="sub">hyprland-pets puts a little pet in a pull-down box at the edge of your Hyprland screen. Drag him out and he walks on your windows. Throw him, catch him, pet him, dress him up.</p>
+  <div class="cmd card" data-platform>
+    <code><span class="dollar">$</span><span id="install-line">curl -fsSL https://github.com/BugzySleeps/hyprland-pets/releases/latest/download/install.sh | bash</span></code>
+    <button class="btn primary" id="copy">Copy</button>
+  </div>
+  <div class="actions">
+    <a class="btn" href="#trailer">▶ Watch the trailer</a>
+    <a class="btn" href="https://github.com/BugzySleeps/hyprland-pets">★ Star on GitHub</a>
+  </div>
+  <p class="hint">Psst: <b>hover the little tab at the top of the page.</b> Then drag Larry out.</p>
+</div>
+
+<section id="trailer"><div class="wrap">
+  <div class="video" data-platform>
+    <video controls preload="none" poster="showcase.jpg" playsinline>
+      <source src="showcase.mp4" type="video/mp4">
+    </video>
+  </div>
+</div></section>
+
+<section id="features"><div class="wrap">
+  <h2>Small cow, lots going on</h2>
+  <p class="lead">One small Python process that stays out of your way: clicks go straight through to your windows everywhere except the pet, and it hides while anything is fullscreen.</p>
+  <div class="grid">
+    <div class="card feature" data-platform><div class="ico">🪟</div><h3>Walks on your windows</h3><p>Lands on top of them, rides along when you move them, hops between them, and can even move into your terminal.</p></div>
+    <div class="card feature" data-platform><div class="ico">🎯</div><h3>Throw and catch</h3><p>Fling him off the screen edges and catch him on the way down. Wall bounces score extra, and your best streak is kept.</p></div>
+    <div class="card feature" data-platform><div class="ico">💗</div><h3>Petting</h3><p>Hold the scroll wheel and stroke him. Hearts float up, and keep going and he flops over, blissed out.</p></div>
+    <div class="card feature" data-platform><div class="ico">🎩</div><h3>A whole wardrobe</h3><p>16 accessories plus your own pictures, fitted by drag and drop. Seasonal ones to claim around the holidays.</p></div>
+    <div class="card feature" data-platform><div class="ico">🎨</div><h3>Any colour cow</h3><p>Recolour his skin, spots and lines on a colour wheel, or use any picture as your pet instead.</p></div>
+    <div class="card feature" data-platform><div class="ico">🌦️</div><h3>Dresses for the weather</h3><p>An umbrella hat in the rain, a scarf when it's cold, and rain or snow in his box. No account needed.</p></div>
+    <div class="card feature" data-platform><div class="ico">🎵</div><h3>Dances to your music</h3><p>Anything playing makes him bop, sway and headbang. With cava he finds the beat of the song.</p></div>
+    <div class="card feature" data-platform><div class="ico">🏍️</div><h3>Goes for rides</h3><p>Every so often he hops on a mini motorcycle, a car, a one-cow helicopter or a bike.</p></div>
+    <div class="card feature" data-platform><div class="ico">📊</div><h3>Lives in your Waybar</h3><p>A little square with his face, showing how he feels. Click it and he pops out with a puff of smoke.</p></div>
+    <div class="card feature" data-platform><div class="ico">🖌️</div><h3>Themes from palettes</h3><p>A dozen built-in themes, or make one from any Coolors palette, by upload or by link.</p></div>
+    <div class="card feature" data-platform><div class="ico">📦</div><h3>Share your pet</h3><p>Export your pet as one .larrypet file, look and outfit and all, and import other people's.</p></div>
+    <div class="card feature" data-platform><div class="ico">👋</div><h3>Says hello properly</h3><p>A first-run welcome and a short tour, and it tells you when there's an update, but never updates by surprise.</p></div>
+  </div>
+</div></section>
+
+<section id="colours"><div class="wrap">
+  <h2>Make him yours</h2>
+  <p class="lead">This is the real recolouring from the app, running right here. Pick some colours and the Larry wandering this page changes too.</p>
+  <div class="make">
+    <div class="stage" data-platform><canvas id="big"></canvas></div>
+    <div>
+      <div class="pickers">
+        <label><input type="color" id="skin" value="#ffffff">Skin</label>
+        <label><input type="color" id="spots" value="#000000">Spots</label>
+        <label><input type="color" id="lines" value="#000000">Lines</label>
+      </div>
+      <div class="presets" id="presets"></div>
+    </div>
+  </div>
+</div></section>
+
+<section id="shots"><div class="wrap">
+  <h2>The settings window</h2>
+  <p class="lead">Four tabs, live preview, searchable, and soft little click sounds.</p>
+  <div class="shots">
+    <figure><img src="pet.png" alt="Pet, Look tab: picture, size, outline and coat colours" loading="lazy"><figcaption>Pet › Look</figcaption></figure>
+    <figure><img src="acc.png" alt="Pet, Wardrobe tab: the fitting room" loading="lazy"><figcaption>Pet › Wardrobe</figcaption></figure>
+    <figure><img src="fun.png" alt="Play, Fun tab: catch game, music and more" loading="lazy"><figcaption>Play › Fun</figcaption></figure>
+    <figure><img src="anim.png" alt="Play, Moves tab: animation curves" loading="lazy"><figcaption>Play › Moves</figcaption></figure>
+    <figure><img src="weather.png" alt="Box, Weather tab" loading="lazy"><figcaption>Box › Weather</figcaption></figure>
+    <figure><img src="themes.png" alt="Style, Themes tab" loading="lazy"><figcaption>Style › Themes</figcaption></figure>
+  </div>
+</div></section>
+
+<section id="install"><div class="wrap">
+  <h2>Install</h2>
+  <p class="lead">One line, in a terminal inside Hyprland. It installs what's missing on Arch, Debian/Ubuntu, Fedora and Gentoo, adds itself to your Hyprland config and starts. It asks before using sudo or touching your config. Run it again to update; your settings are kept.</p>
+  <div class="cmd card" data-platform>
+    <code><span class="dollar">$</span>curl -fsSL https://github.com/BugzySleeps/hyprland-pets/releases/latest/download/install.sh | bash</code>
+    <button class="btn primary copy2">Copy</button>
+  </div>
+  <div class="card" style="margin-top:22px" data-platform>
+    <table>
+      <tr><td>Needs</td><td>Hyprland, Python 3.11+ with PyGObject, pycairo and Pillow, GTK 3 and gtk-layer-shell (with introspection). Optional: GStreamer for sounds, cava for dancing in time.</td></tr>
+      <tr><td>Arch</td><td><code>python-gobject gtk3 gtk-layer-shell python-cairo python-pillow gst-plugins-good</code></td></tr>
+      <tr><td>Gentoo</td><td><code>dev-python/pygobject x11-libs/gtk+:3 gui-libs/gtk-layer-shell[introspection] dev-python/pycairo dev-python/pillow media-plugins/gst-plugins-pulse</code></td></tr>
+      <tr><td>Debian / Ubuntu</td><td><code>python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-gtklayershell-0.1 python3-pil gir1.2-gstreamer-1.0 gstreamer1.0-pulseaudio</code></td></tr>
+      <tr><td>Fedora</td><td><code>python3-gobject python3-cairo gtk3 gtk-layer-shell python3-pillow gstreamer1-plugins-good</code></td></tr>
+    </table>
+  </div>
+</div></section>
+
+<section id="faq"><div class="wrap">
+  <h2>Questions</h2>
+  <details><summary>Does it work outside Hyprland?</summary><p>It's built for Hyprland. It draws with gtk-layer-shell, so it runs on other wlroots compositors and KDE too, but the window-aware parts (walking on windows, terminals) use Hyprland's IPC. GNOME and X11 aren't supported.</p></details>
+  <details><summary>Is it heavy?</summary><p>No: it's one small Python process, and it sleeps when nothing's moving. Clicks pass straight through to your windows everywhere except the pet, the tab and the box.</p></details>
+  <details><summary>Does it send anything anywhere?</summary><p>Only if you turn things on: the weather (Open-Meteo, just your town's coordinates) and the update check (asks GitHub for the latest version). No accounts, no tracking. Your "profile" is a file on your computer.</p></details>
+  <details><summary>Can I use my own pet?</summary><p>Yes: any picture works, PNGs with transparency look best. Larry gets the extra poses (sitting, sleeping, typing, riding) and recolouring, but every pet walks, gets thrown, wears accessories and dances.</p></details>
+  <details><summary>How do I uninstall?</summary><p>Run the installer with <code>--uninstall</code>: <code>curl -fsSL …/install.sh | bash -s -- --uninstall</code>. Your settings in ~/.config/larry stay unless you delete them.</p></details>
+</div></section>
+</main>
+
+<footer><div class="wrap">
+  <div class="note" data-platform><b>How this was made:</b> this whole thing was vibecoded with Claude Opus 5.5, just a fun little project because I was bored. Somehow it turned into a cow with a wardrobe, a weather app, a Waybar module and a helicopter. Enjoy Larry.</div>
+  <p>MIT licensed · <a href="https://github.com/BugzySleeps/hyprland-pets">github.com/BugzySleeps/hyprland-pets</a> · Larry would like a star ⭐</p>
+</div></footer>
+
+<div class="lightbox" id="lightbox"><img alt=""></div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (s) => document.querySelector(s);
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // ── copy buttons ─────────────────────────────────
+  const line = $("#install-line").textContent;
+  for (const b of [$("#copy"), ...document.querySelectorAll(".copy2")]) {
+    b.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(line); b.textContent = "Copied!"; }
+      catch { b.textContent = "Select it"; }
+      setTimeout(() => (b.textContent = "Copy"), 1600);
+    });
+  }
+
+  // ── screenshot lightbox ──────────────────────────
+  const lb = $("#lightbox");
+  document.querySelectorAll(".shots img").forEach((img) =>
+    img.addEventListener("click", () => { lb.querySelector("img").src = img.src; lb.classList.add("on"); }));
+  lb.addEventListener("click", () => lb.classList.remove("on"));
+
+  // ── recolouring (the same maths as the app's sprites.recolor) ──
+  const load = (src) => new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = src; });
+  const hex = (h) => [1, 3, 5].map((k) => parseInt(h.slice(k, k + 2), 16));
+  const pixels = (img) => {
+    const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+    const x = c.getContext("2d"); x.drawImage(img, 0, 0); return x.getImageData(0, 0, c.width, c.height);
+  };
+  let art = null;   // {stand, standMap, fall, fallMap}
+  function recolor(base, map, skin, spots, lines, out) {
+    const src = base.data, m = map.data, img = new ImageData(base.width, base.height), d = img.data;
+    for (let i = 0; i < src.length; i += 4) {
+      const lum = (src[i] * 299 + src[i + 1] * 587 + src[i + 2] * 114) / 255000;   // 0..1
+      const dark = 1 - lum, r = m[i] / 255, keep = m[i + 1] / 255;
+      for (let k = 0; k < 3; k++) {
+        const ink = spots[k] * r + lines[k] * (1 - r);
+        const v = ink * dark + skin[k] * (1 - dark);
+        d[i + k] = src[i + k] * keep + v * (1 - keep);
+      }
+      d[i + 3] = src[i + 3];
+    }
+    out.width = base.width; out.height = base.height;
+    out.getContext("2d").putImageData(img, 0, 0);
+  }
+  const standC = document.createElement("canvas"), fallC = document.createElement("canvas");
+  const coat = { skin: "#ffffff", spots: "#000000", lines: "#000000" };
+  function applyCoat() {
+    if (!art) return;
+    const s = hex(coat.skin), p = hex(coat.spots), l = hex(coat.lines);
+    recolor(art.stand, art.standMap, s, p, l, standC);
+    recolor(art.fall, art.fallMap, s, p, l, fallC);
+    const big = $("#big"); big.width = standC.width; big.height = standC.height;
+    big.getContext("2d").drawImage(standC, 0, 0);
+    pet.dirty = true;
+  }
+  const PRESETS = [["Classic", "#ffffff", "#000000"], ["Jersey", "#f4dcc0", "#a0582a"], ["Highland", "#f6c08a", "#c4561a"],
+    ["Chocolate", "#8a5a3a", "#3b2216"], ["Strawberry", "#ffd3e2", "#e04a80"], ["Midnight", "#34363f", "#f4f4f6"],
+    ["Golden", "#fff1c2", "#d8a21a"], ["Mint", "#e3fff2", "#2fb38a"], ["Grape", "#ece2ff", "#7a4fd6"], ["Sky", "#e2f1ff", "#3d8fe0"]];
+  for (const [name, skin, spots] of PRESETS) {
+    const b = document.createElement("button");
+    b.className = "preset"; b.title = name;
+    b.style.background = `radial-gradient(circle at 32% 38%, ${spots} 0 22%, transparent 23%), radial-gradient(circle at 70% 66%, ${spots} 0 18%, transparent 19%), ${skin}`;
+    b.addEventListener("click", () => {
+      Object.assign(coat, { skin, spots, lines: "#000000" });
+      $("#skin").value = skin; $("#spots").value = spots; $("#lines").value = "#000000";
+      applyCoat();
+    });
+    $("#presets").appendChild(b);
+  }
+  for (const k of ["skin", "spots", "lines"]) $("#" + k).addEventListener("input", (e) => { coat[k] = e.target.value; applyCoat(); });
+
+  // ── the box ──────────────────────────────────────
+  const box = $("#box"), tab = $("#tab"), score = $("#score");
+  let pinned = false, hoverUntil = 0;
+  const overBox = (x, y) => { const r = box.getBoundingClientRect(); return box.classList.contains("open") && x > r.left && x < r.right && y < r.bottom; };
+  const overTab = (x, y) => { const r = tab.getBoundingClientRect(); return x > r.left - 6 && x < r.right + 6 && y < r.bottom + 6; };
+  tab.addEventListener("click", () => { pinned = !pinned; tab.classList.toggle("pinned", pinned); });
+  let pointer = null;     // where the mouse is (checked every frame: hovering still counts when it stops moving)
+  addEventListener("pointermove", (e) => { pointer = [e.clientX, e.clientY]; });
+  document.documentElement.addEventListener("pointerleave", () => { pointer = null; });
+
+  // ── Larry ────────────────────────────────────────
+  const el = $("#pet"), cv = $("#sprite"), ctx = cv.getContext("2d");
+  const H = innerWidth < 600 ? 62 : 76;            // standing height, px
+  const pet = {
+    mode: "box", x: 0, y: 0, vx: 0, vy: 0, dir: 1, phase: 0, walking: false, pause: 1,
+    platform: null, bx: 140, held: null, toss: null, streak: 0, best: 0, dirty: true, squash: 0, squashT: 0,
+  };
+  try { pet.best = +localStorage.getItem("larry-best") || 0; } catch {}
+  const W = () => H * (standC.width / standC.height || 1.05);
+  const platforms = () => [...document.querySelectorAll("[data-platform]")].map((n) => ({ n, r: n.getBoundingClientRect() }));
+
+  function popup(text, x, y, big) {
+    const p = document.createElement("div"); p.className = "popup" + (big ? " big" : ""); p.textContent = text;
+    p.style.left = x + "px"; p.style.top = y + "px"; document.body.appendChild(p); setTimeout(() => p.remove(), 1200);
+  }
+  function heart(x, y) {
+    const p = document.createElement("div"); p.className = "heart"; p.textContent = "♥";
+    p.style.left = x + (Math.random() - .5) * 30 + "px"; p.style.top = y + "px";
+    document.body.appendChild(p); setTimeout(() => p.remove(), 1300);
+  }
+  function showScore() {
+    score.hidden = !(pet.best || pet.streak);
+    score.textContent = pet.streak ? `★ ${pet.best} · ${pet.streak}` : `★ ${pet.best}`;
+  }
+  function endStreak() {
+    if (pet.streak) {
+      if (pet.streak >= pet.best) { pet.best = pet.streak; try { localStorage.setItem("larry-best", pet.best); } catch {}
+        popup(`New best: ${pet.best}!`, pet.x + W() / 2, pet.y - 30, true); }
+      pet.streak = 0; showScore();
+    }
+    pet.toss = null;
+  }
+
+  // drag, throw, catch, pat
+  let downAt = null;
+  el.addEventListener("pointerdown", (e) => {
+    e.preventDefault(); el.setPointerCapture(e.pointerId);
+    const airborne = pet.mode === "free" && !pet.platform;
+    if (airborne && pet.toss) {                     // caught it!
+      const pts = 1 + pet.toss.hits.size;
+      pet.streak += pts; showScore();
+      popup(pts > 1 ? `+${pts}` : "+1", pet.x + W() / 2, pet.y - 10, pts > 1);
+      pet.toss = null;
+    }
+    if (pet.mode === "box") { const r = box.getBoundingClientRect(); pet.x = r.left + pet.bx; pet.y = r.bottom - 14 - H; }
+    pet.held = { ox: e.clientX - pet.x, oy: e.clientY - pet.y, hist: [[performance.now(), e.clientX, e.clientY]] };
+    pet.mode = "drag"; pet.platform = null; el.classList.add("held");
+    downAt = [performance.now(), e.clientX, e.clientY];
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (!pet.held) return;
+    pet.x = e.clientX - pet.held.ox; pet.y = e.clientY - pet.held.oy;
+    const now = performance.now();
+    pet.held.hist = pet.held.hist.filter((h) => now - h[0] < 90).concat([[now, e.clientX, e.clientY]]);
+  });
+  const release = (e) => {
+    if (!pet.held) return;
+    const [t0, x0, y0] = pet.held.hist[0], [t1, x1, y1] = pet.held.hist[pet.held.hist.length - 1];
+    const dt = Math.max((t1 - t0) / 1000, 0.001);
+    const quick = downAt && performance.now() - downAt[0] < 220 && Math.hypot(e.clientX - downAt[1], e.clientY - downAt[2]) < 6;
+    pet.held = null; el.classList.remove("held");
+    if (overBox(e.clientX, e.clientY)) {                 // back in the box
+      const r = box.getBoundingClientRect();
+      pet.mode = "box"; pet.bx = Math.min(Math.max(pet.x - r.left, 8), r.width - W() - 8); endStreak(); return;
+    }
+    pet.mode = "free";
+    const cap = 2400;
+    pet.vx = Math.max(-cap, Math.min(cap, (x1 - x0) / dt * 0.9));
+    pet.vy = Math.max(-cap, Math.min(cap, (y1 - y0) / dt * 0.9));
+    if (quick) { pet.vx = pet.vy = 0; for (let i = 0; i < 3; i++) setTimeout(() => heart(pet.x + W() / 2, pet.y), i * 120); }
+    const speed = Math.hypot(pet.vx, pet.vy);
+    pet.toss = (pet.vy < -300 || speed > 450) ? { hits: new Set() } : null;
+  };
+  el.addEventListener("pointerup", release);
+  el.addEventListener("pointercancel", release);
+
+  // the main loop
+  let last = performance.now();
+  function tick(now) {
+    const dt = Math.min((now - last) / 1000, 0.05); last = now;
+    // box open/close
+    if (pointer && (overTab(...pointer) || overBox(...pointer))) hoverUntil = now + 450;
+    const open = pinned || now < hoverUntil || (pet.mode === "drag" && pet.y < 200);
+    box.classList.toggle("open", open);
+    const w = W(), br = box.getBoundingClientRect();
+    if (pet.mode === "box") {
+      wander(dt, 6, br.width - w - 6, (v) => (pet.bx = v), pet.bx);
+      pet.x = br.left + pet.bx; pet.y = br.bottom - 13 - H;
+      el.style.visibility = br.bottom > 30 ? "visible" : "hidden";
+      el.style.zIndex = 45; el.style.clipPath = `inset(${Math.max(0, br.top - pet.y)}px 0 0 0)`;
+    } else {
+      el.style.visibility = "visible"; el.style.zIndex = 50; el.style.clipPath = "none";
+    }
+    if (pet.mode === "free") step(dt, w);
+    draw(now, w);
+    requestAnimationFrame(tick);
+  }
+
+  function wander(dt, lo, hi, set, x) {
+    if (pet.pause > 0) { pet.pause -= dt; pet.walking = false; return; }
+    pet.walking = true;
+    let nx = x + pet.dir * 42 * dt;
+    if (nx <= lo || nx >= hi) { nx = Math.min(Math.max(nx, lo), hi); pet.dir *= -1; pet.pause = 0.6 + Math.random(); }
+    else if (Math.random() < dt * 0.25) { pet.pause = 0.8 + Math.random() * 2.2; if (Math.random() < .5) pet.dir *= -1; }
+    pet.phase += dt * 5.2;
+    set(nx);
+  }
+
+  function step(dt, w) {
+    const vw = innerWidth, vh = innerHeight;
+    if (pet.platform) {                                // standing: ride along with it as the page scrolls
+      const r = pet.platform.getBoundingClientRect();
+      const top = r.top;
+      if (top > vh || top < H * 0.6 || r.width === 0) { pet.platform = null; pet.vy = 0; return; }   // gone: fall
+      pet.y = top - H;
+      const lo = r.left - w * 0.35, hi = r.right - w * 0.65;
+      if (pet.x < lo - 1 || pet.x > hi + 1) { pet.platform = null; pet.vy = -60; return; }        // walked off: hop down
+      wander(dt, lo - (Math.random() < 0.002 ? 40 : 0), hi + (Math.random() < 0.002 ? 40 : 0), (v) => (pet.x = v), pet.x);
+      return;
+    }
+    if (pet.y + H >= vh - 0.5 && Math.abs(pet.vy) < 1) {   // on the floor (the bottom of the window)
+      pet.y = vh - H;
+      wander(dt, 0, vw - w, (v) => (pet.x = v), pet.x);
+      return;
+    }
+    // flying
+    const feet0 = pet.y + H;
+    pet.vy += 2400 * dt; pet.x += pet.vx * dt; pet.y += pet.vy * dt;
+    pet.walking = false;
+    if (pet.x < 0) { pet.x = 0; pet.vx = -pet.vx * 0.55; pet.toss?.hits.add("left"); }
+    if (pet.x > vw - w) { pet.x = vw - w; pet.vx = -pet.vx * 0.55; pet.toss?.hits.add("right"); }
+    if (pet.y < 0) { pet.y = 0; pet.vy = -pet.vy * 0.4; pet.toss?.hits.add("top"); }
+    const feet = pet.y + H;
+    if (pet.vy > 0) {
+      for (const { n, r } of platforms()) {
+        const cx = pet.x + w / 2;
+        if (feet0 <= r.top + 1 && feet >= r.top && cx > r.left && cx < r.right && r.top > H * 0.6 && r.top < vh) {
+          land(r.top, n); return;
+        }
+      }
+      if (feet >= vh) land(vh, null);
+    }
+  }
+
+  function land(top, node) {
+    pet.y = top - H;
+    if (pet.vy > 900) { pet.vy = -pet.vy * 0.32; pet.vx *= 0.6; return; }   // a little bounce first
+    pet.vy = 0; pet.vx = 0; pet.platform = node; pet.pause = 0.7;
+    pet.squash = 1; pet.squashT = performance.now();
+    if (pet.toss) endStreak();
+  }
+
+  function draw(now, w) {
+    const airborne = pet.mode === "drag" || (pet.mode === "free" && !pet.platform && !(pet.y + H >= innerHeight - 0.5 && Math.abs(pet.vy) < 1));
+    const img = airborne ? fallC : standC;
+    if (!img.width) return;
+    const h = airborne ? H * 1.625 : H, iw = h * img.width / img.height;
+    if (cv.width !== Math.round(iw * devicePixelRatio) || pet.dirty || cv.dataset.pose !== String(airborne)) {
+      cv.width = Math.round(iw * devicePixelRatio); cv.height = Math.round(h * devicePixelRatio);
+      cv.style.width = iw + "px"; cv.style.height = h + "px";
+      ctx.imageSmoothingQuality = "high"; ctx.drawImage(img, 0, 0, cv.width, cv.height);
+      cv.dataset.pose = String(airborne); pet.dirty = false;
+    }
+    let tilt = 0, bob = 0, sx = 1, sy = 1;
+    if (airborne) {
+      tilt = pet.mode === "drag" ? Math.sin(now / 140) * 0.14 : Math.max(-.5, Math.min(.5, pet.vx / 1500)) + Math.sin(now / 66) * 0.09;
+    } else if (pet.walking && !reduce) {
+      bob = Math.abs(Math.sin(pet.phase * Math.PI)) * H * 0.07; tilt = Math.sin(pet.phase * Math.PI) * 0.07 * pet.dir;
+    }
+    const k = (now - pet.squashT) / 1000;
+    if (pet.squash && k < 0.6 && !reduce) { const q = Math.exp(-k * 7) * Math.cos(k * 22) * 0.22; sx = 1 + q / 2; sy = 1 - q; }
+    const flip = pet.dir < 0 ? -1 : 1;
+    const left = pet.x + w / 2 - iw / 2, top = airborne ? pet.y + H - h / 2 - H / 2 : pet.y;
+    el.style.transformOrigin = airborne ? "50% 50%" : "50% 100%";
+    el.style.transform = `translate(${left}px, ${top - bob}px) rotate(${tilt}rad) scale(${sx * flip}, ${sy})`;
+  }
+
+  Promise.all(["site/larry.png", "site/larry-coat.png", "site/larry-falling.png", "site/larry-falling-coat.png"].map(load))
+    .then(([s, sm, f, fm]) => {
+      try { art = { stand: pixels(s), standMap: pixels(sm), fall: pixels(f), fallMap: pixels(fm) }; applyCoat(); }
+      catch {                                    // (opened from a file: no pixel access, so no recolouring)
+        for (const [c, i] of [[standC, s], [fallC, f]]) { c.width = i.width; c.height = i.height; c.getContext("2d").drawImage(i, 0, 0); }
+        const big = $("#big"); big.width = s.width; big.height = s.height; big.getContext("2d").drawImage(s, 0, 0);
+      }
+      showScore();
+      setTimeout(() => { if (!pinned) { hoverUntil = performance.now() + 2200; } }, 900);   // a peek on arrival
+      requestAnimationFrame(tick);
+    });
+})();
+</script>
+</body>
+</html>

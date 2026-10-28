@@ -2,6 +2,8 @@
 
 A little pet that lives in a pull-down box on the edge of your Hyprland screen.
 
+**Website: [bugzysleeps.github.io/hyprland-pets](https://bugzysleeps.github.io/hyprland-pets/)** (go drag Larry around)
+
 Hover the tab and the box slides out with your pet wandering around inside. Drag the pet out and
 it drops onto your desktop, lands on top of your windows (and rides along when you move them),
 and walks around on top of everything. Drag it back into the box to put it away. It hides itself
