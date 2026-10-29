@@ -47,6 +47,7 @@ DEFAULTS = {
         "peek": True,                  # with the box shut, pokes his head out beside the tab now and then
         "petting": True,               # hold the middle mouse button (scroll wheel) and stroke him
         "greet": True,                 # climbs out and stretches when you log in (excited after a few days away)
+        "game": False,                 # something fullscreen (a game): sits in a corner and watches (click it away)
         "goodbye": False,              # waves goodbye in the middle of the screen when you shut down or reboot
     },
     "reactions": {
@@ -158,6 +159,7 @@ COMMENTS = {
     "sleep_after": f"seconds of a still mouse before falling asleep ({SLEEP_MIN}-{SLEEP_MAX})",
     "petting": "hold the middle mouse button (scroll wheel) and move over the pet to pet it",
     "peek": "with the box closed, the pet pokes its head out beside the tab now and then",
+    "game": "when something goes fullscreen (a game), the pet sits in a corner and watches instead of hiding; click it to send it away (off by default)",
     "goodbye": "when you shut down or reboot, the pet waves goodbye in the middle of the screen and floats away (off by default)",
     "greet": "when you log in, the pet climbs out of its box and stretches (extra excited if you've been away a few days)",
     "sounds": "click and tick sounds in the settings window",
@@ -219,7 +221,7 @@ def parse(user):
         cfg["tab"]["position"] = max(0, min(100, round(pos)))
 
     ubeh = user.get("behavior") if isinstance(user.get("behavior"), dict) else {}
-    for key in ("watch", "sit", "sleep", "petting", "peek", "greet", "goodbye"):
+    for key in ("watch", "sit", "sleep", "petting", "peek", "greet", "goodbye", "game"):
         if isinstance(ubeh.get(key), bool):
             cfg["behavior"][key] = ubeh[key]
     v = ubeh.get("sleep_after")

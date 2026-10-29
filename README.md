@@ -102,6 +102,10 @@ customisable from a settings window: the box's scene, the pet's accessories, and
   away before the screen fades out (this one's off by default). It uses systemd-logind's shutdown delay
   (at most 5 seconds), so it works however you shut down. Switch either in Settings → Idle behaviour; `hyprland-pets --goodbye`
   (or "Try it") shows the goodbye without shutting anything down.
+- **Game mode** (off by default). Normally your pet hides while something is fullscreen. With game
+  mode on, it pops into the bottom-right corner, sits and watches you play instead. It's a still
+  picture, so it costs your game nothing, and clicks only land on the pet itself. Click it to send it
+  away until you leave fullscreen. Turn it on in Settings → Idle behaviour.
 - **Petting.** Hold the middle mouse button (the scroll wheel) on your pet and stroke it: hearts float
   up and it leans into your hand with happy eyes. Keep going and it flops over on its side, blissed
   out (with a little moo if pet sounds are on). It can be turned off under Play → Fun.

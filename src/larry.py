@@ -215,6 +215,7 @@ class Larry(Gtk.Window):
         self.come_to = None       # voice "come here": the screen x he's walking to (and until when)
         self.come_until = 0.0
         self.voice_dance_until = 0.0
+        self.gaming = None        # something's fullscreen: None | "watch" (sitting in the corner) | "away" (clicked away)
         self.bye = None           # waving goodbye: {"start", "kind" (poweroff / reboot / None for a preview)}
         self.bye_lock = None      # logind's shutdown "delay" lock (an fd): shutdown waits until we let go
         self.bye_sprites = None   # (standing, waving frames or None) drawn big and sharp for the goodbye
@@ -417,7 +418,10 @@ class Larry(Gtk.Window):
 
     # ── input region: only the tab/box and Larry catch the mouse ───────────
     def update_input(self):
-        if self.mode == "drag":
+        if self.gaming:
+            _s, x, y, w, h = self.watch_spot()
+            rects = [(x, y, w, h)] if self.gaming == "watch" else []
+        elif self.mode == "drag":
             rects = [(0, 0, self.W, self.H)]  # keep getting motion wherever he's dragged
         else:
             rects = [self.to_edge(self.tab_rect(), 5)] if self.has_box else []
@@ -453,6 +457,10 @@ class Larry(Gtk.Window):
 
     def on_press(self, _w, ev):
         p = (ev.x, ev.y)
+        if self.gaming:
+            if self.gaming == "watch":
+                self.send_away()
+            return
         if ev.button == 3:
             self.open_settings()
             return
@@ -556,6 +564,18 @@ class Larry(Gtk.Window):
     def check_fullscreen(self):
         ws = hypr("activeworkspace") or {}
         full = bool(ws.get("hasfullscreen"))
+        if full and self.cfg["behavior"].get("game", False):   # game mode: watch from the corner
+            if self.gaming is None:
+                self.start_watching()
+            return
+        if self.gaming:                                         # (left fullscreen, or game mode turned off)
+            self.gaming = None
+            self.input_key = None
+            self.update_input()
+            self.queue_draw()
+            self.wake()
+            if full:
+                self.hide()
         if full and self.get_visible():
             self.hide()
         elif not full and not self.get_visible():
@@ -563,6 +583,58 @@ class Larry(Gtk.Window):
             self.input_key = None
             self.update_input()
             self.wake()
+
+    # ── game mode: watching something fullscreen from the corner ────────────
+    def watch_spot(self):
+        """(sprite, x, y, w, h): sitting right in the bottom-right corner, facing the middle."""
+        sprite = self.poses["sit"][1] if "sit" in self.poses else self.sprites[1]
+        w, h = sprites.logical_size(sprite)
+        right, bottom = self.blank_edges(sprite)       # (his picture's see-through margins)
+        return sprite, self.W - w + right, self.H - h + bottom, w, h
+
+    def blank_edges(self, sprite):
+        """How many see-through px the sprite has on its right and at its bottom (remembered)."""
+        key = id(sprite)
+        if getattr(self, "edges", (None,))[0] != key:
+            sprite.flush()
+            sw, sh, stride = sprite.get_width(), sprite.get_height(), sprite.get_stride()
+            data = sprite.get_data()
+            alpha = lambda x, y: data[y * stride + x * 4 + 3]   # (ARGB32, little-endian: alpha is byte 3)
+            right = next((i for i in range(sw) if any(alpha(sw - 1 - i, y) > 16 for y in range(sh))), 0)
+            bottom = next((i for i in range(sh) if any(alpha(x, sh - 1 - i) > 16 for x in range(sw))), 0)
+            scale = sprite.get_device_scale()[0]
+            self.edges = (key, right / scale, bottom / scale)
+        return self.edges[1], self.edges[2]
+
+    def start_watching(self):
+        self.gaming = "watch"
+        if not self.get_visible():
+            self.show_all()
+        _s, x, y, w, h = self.watch_spot()
+        self.add_poof(x + w / 2, y + h / 2, h * 1.1)
+        self.input_key = None
+        self.update_input()
+        self.queue_draw()
+        self.wake()
+
+    def send_away(self):
+        """Clicked: poof, and stay away until the fullscreen thing is gone."""
+        _s, x, y, w, h = self.watch_spot()
+        self.gaming = "away"
+        self.add_poof(x + w / 2, y + h / 2, h * 1.1)
+        self.input_key = None
+        self.update_input()
+        self.queue_draw()
+        self.wake()
+        GLib.timeout_add(int(self.POOF_TIME * 1000) + 100,
+                         lambda: (self.gaming == "away" and self.hide()) and False)
+
+    def draw_watching(self, cr):
+        if self.gaming == "watch":
+            sprite, x, y, w, h = self.watch_spot()
+            sprites.draw_pet(cr, sprite, x + w / 2, y + h, 0, 0, 0)
+        if self.poofs:
+            self.draw_poofs(cr, time.monotonic())
 
     def refresh_platforms(self):
         mons = hypr("monitors") or []
@@ -836,6 +908,8 @@ class Larry(Gtk.Window):
             self.recolor()
         if weather_changed:
             self.start_weather()
+        if cfg["behavior"].get("game") != self.cfg["behavior"].get("game"):
+            GLib.idle_add(lambda: self.check_fullscreen() and False)
         if cfg["behavior"].get("goodbye") != self.cfg["behavior"].get("goodbye"):
             GLib.idle_add(lambda: (self.take_bye_lock() if self.cfg["behavior"].get("goodbye", False)
                                    else self.drop_bye_lock()) and False)
@@ -1132,6 +1206,15 @@ class Larry(Gtk.Window):
         now = time.monotonic()
         dt = min(now - self.last, 0.1)
         self.last = now
+        if self.gaming and not self.bye:                # (sitting still in the corner: nothing to animate)
+            for p_ in self.poofs:
+                self.damage(*self.poof_rect(p_))
+            self.poofs = [p_ for p_ in self.poofs if now - p_["start"] < self.POOF_TIME + 0.05]
+            self.flush_damage()
+            if not self.poofs:
+                self.ticking = None
+                return False
+            return True
 
         # box open/close
         # while you carry the pet, the box only opens when you bring it close (so it can be put away)
@@ -2769,6 +2852,9 @@ class Larry(Gtk.Window):
         cr.paint()
         cr.set_operator(cairo.OPERATOR_OVER)
         if self.bye and self.draw_bye(cr):
+            return
+        if self.gaming:
+            self.draw_watching(cr)
             return
         c = self.colors
         bx, by, bw, bh, stretch = self.box_geom()

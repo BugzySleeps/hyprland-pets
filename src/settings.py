@@ -1529,6 +1529,8 @@ class Settings(Gtk.Window):
             ("peek", "Peek out", "With the box shut, it pokes its head out beside the tab now and then"),
             ("greet", "Say hello when you log in", "Climbs out of its box and stretches. Away a few days? It's "
                                                     "extra excited to see you"),
+            ("game", "Game mode", "When a game (or anything) goes fullscreen, it sits in a corner and watches "
+                                  "instead of hiding. Click it to send it away"),
             ("goodbye", "Say goodbye when you shut down", "Waves from the middle of the screen and floats away "
                                                           "before your computer turns off (or restarts)"),
         ):
